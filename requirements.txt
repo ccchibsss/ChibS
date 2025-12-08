@@ -1,8 +1,5 @@
 streamlit==1.23.0
-polars==0.16.0
+polars>=0.16
 duckdb==0.8.1
 pandas==1.5.3
 openpyxl==3.1.2
-# zipfile36 можно не указывать, так как встроен в Python 3.6+
-# Для работы с ZIP-архивами в более старых версиях
-# zipfile36==0.4.2
