@@ -630,7 +630,9 @@ class AutoPartsCatalog:
         query = f"""
         {ctes}
         SELECT
-            {'CASE WHEN pr.price IS NOT NULL AND {markup_expr} THEN pr.price * (1 + COALESCE(brm.markup, {self.price_rules['global_markup']})) ELSE pr.price END AS "Цена",' 
+            markup_value = self.price_rules['global_markup']
+markup_expr_str = f"{markup_value}"
+sql_case = f"CASE WHEN pr.price IS NOT NULL AND {markup_expr_str} THEN pr.price * (1 + COALESCE(brm.markup, {markup_value})) ELSE pr.price END AS \"Цена\"" 
              if include_prices and apply_markup else 'pr.price AS "Цена",'}
             {'COALESCE(pr.currency, "RUB") AS "Валюта",' if include_prices else ''}
             {select_exprs}
