@@ -1,195 +1,140 @@
-import platform
-import sys
 import polars as pl
 import duckdb
 import streamlit as st
 import os
 import time
-import io
 import logging
-import psutil
+import io
+import zipfile
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import psutil
 import warnings
 
 warnings.filterwarnings('ignore')
 
-# Настройка логирования
+# --- Настройка логирования ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-EXCEL_ROW_LIMIT = 1_000_000  # лимит строк в Excel при экспорте
+# --- Константы ---
+EXCEL_ROW_LIMIT = 1_000_000
 
-class AutoPartsCatalog:
+class HighVolumeAutoPartsCatalog:
     def __init__(self):
-        # Основные параметры и папка данных
         self.data_dir = Path("./auto_parts_data")
         self.data_dir.mkdir(exist_ok=True)
 
-        # Конфигурации и настройки
+        # Конфиги
         self.cloud_config = self.load_cloud_config()
         self.price_rules = self.load_price_rules()
         self.exclusion_rules = self.load_exclusion_rules()
         self.category_mapping = self.load_category_mapping()
 
-        # Инициализация базы данных DuckDB
+        # База данных
         self.db_path = self.data_dir / "catalog.duckdb"
         self.conn = duckdb.connect(str(self.db_path))
         self.setup_database()
-
-        # Настройка интерфейса Streamlit
-        st.set_page_config(
-            page_title="AutoParts Catalog 10M+",
-            layout="wide",
-            page_icon="🚗",
-            initial_sidebar_state="expanded"
-        )
-
-        # Применение кастомного стиля
-        self.apply_custom_theme()
-
-        # Создаем таблицы и индексы
         self.create_indexes()
 
-    def apply_custom_theme(self):
-        """Кастомный стиль интерфейса"""
+        # Интерфейс
+        st.set_page_config(page_title="AutoParts Catalog", layout="wide", page_icon="🚗", initial_sidebar_state="expanded")
+        self.apply_custom_style()
+
+    def apply_custom_style(self):
         st.markdown("""
         <style>
         .main { background-color: #f8f9fa; }
-        .stButton>button { 
-            background-color: #007BFF; 
-            color: white; 
-            border: none; 
-            border-radius: 8px; 
-            padding: 10px 20px; 
-            font-size: 16px; 
-        }
+        .stButton>button { background-color: #007BFF; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 16px; }
         .stButton>button:hover { background-color: #0056b3; }
-        .stButton>button[style="primary"] { 
-            background-color: #28a745; 
-        }
-        .stButton>button[style="primary"]:hover { 
-            background-color: #20c997; 
-        }
-        .stProgress .st-bo { background-color: #007BFF; }
+        .stButton>button[style="primary"] { background-color: #28a745; }
+        .stButton>button[style="primary"]:hover { background-color: #20c997; }
         h1, h2, h3 { color: #003366; }
-        .stAlert { border-radius: 8px; }
-        .metric-card {
-            background: white;
-            padding: 15px;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            text-align: center;
-        }
+        .metric-card { background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center; }
+        .metric-label { font-size: 14px; color: #6c757d; }
         .metric-value { font-size: 24px; font-weight: bold; color: #007BFF; }
+        .stAlert { border-radius: 8px; }
+        .stProgress>div>div>div { background-color: #007BFF; }
         </style>
         """, unsafe_allow_html=True)
 
-    # ----------- Конфигурации и настройки -----------
+    # ----------- Загрузка и сохранение конфигов (БЕЗ encoding!) -----------
 
     def load_cloud_config(self) -> Dict[str, Any]:
         path = self.data_dir / "cloud_config.json"
-        default = {
-            "enabled": False,
-            "provider": "s3",
-            "bucket": "",
-            "region": "",
-            "sync_interval": 3600,
-            "last_sync": 0
-        }
+        default = {"enabled": False, "provider": "s3", "bucket": "", "region": "", "sync_interval": 3600, "last_sync": 0}
         if path.exists():
             try:
-                return json.loads(path.read_text(encoding='utf-8'))
+                return json.loads(path.read_text())
             except Exception as e:
                 logger.error(f"Ошибка загрузки cloud_config.json: {e}")
-        path.write_text(json.dumps(default, indent=2, ensure_ascii=False), encoding='utf-8')
+                return default
+        path.write_text(json.dumps(default, indent=2, ensure_ascii=False))
         return default
 
     def save_cloud_config(self):
         path = self.data_dir / "cloud_config.json"
         self.cloud_config['last_sync'] = int(time.time())
-        try:
-            path.write_text(json.dumps(self.cloud_config, indent=2, ensure_ascii=False), encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Не удалось сохранить cloud_config.json: {e}")
+        path.write_text(json.dumps(self.cloud_config, indent=2, ensure_ascii=False))
 
     def load_price_rules(self) -> Dict[str, Any]:
         path = self.data_dir / "price_rules.json"
-        default = {
-            "global_markup": 0.2,
-            "brand_markups": {},
-            "min_price": 0.0,
-            "max_price": 99999.0
-        }
+        default = {"global_markup": 0.2, "brand_markups": {}, "min_price": 0.0, "max_price": 99999.0}
         if path.exists():
             try:
-                return json.loads(path.read_text(encoding='utf-8'))
+                return json.loads(path.read_text())
             except Exception as e:
                 logger.error(f"Ошибка загрузки price_rules.json: {e}")
-        path.write_text(json.dumps(default, indent=2, ensure_ascii=False), encoding='utf-8')
+                return default
+        path.write_text(json.dumps(default, indent=2, ensure_ascii=False))
         return default
 
     def save_price_rules(self):
         path = self.data_dir / "price_rules.json"
-        try:
-            path.write_text(json.dumps(self.price_rules, indent=2, ensure_ascii=False), encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Не удалось сохранить price_rules.json: {e}")
+        path.write_text(json.dumps(self.price_rules, indent=2, ensure_ascii=False))
 
     def load_exclusion_rules(self) -> List[str]:
         path = self.data_dir / "exclusion_rules.txt"
-        default = ["Кузов", "Стекла", "Масла"]
         if path.exists():
             try:
-                lines = path.read_text(encoding='utf-8').splitlines()
-                return [line.strip() for line in lines if line.strip()]
+                return [line.strip() for line in path.read_text().splitlines() if line.strip()]
             except Exception as e:
                 logger.error(f"Ошибка загрузки exclusion_rules.txt: {e}")
-        path.write_text("\n".join(default), encoding='utf-8')
-        return default
+                return []
+        path.write_text("Кузов\nСтекла\nМасла")
+        return ["Кузов", "Стекла", "Масла"]
 
     def save_exclusion_rules(self):
         path = self.data_dir / "exclusion_rules.txt"
-        try:
-            path.write_text("\n".join(self.exclusion_rules), encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Не удалось сохранить exclusion_rules.txt: {e}")
+        path.write_text("\n".join(self.exclusion_rules))
 
     def load_category_mapping(self) -> Dict[str, str]:
         path = self.data_dir / "category_mapping.txt"
-        default = {
-            "Радиатор": "Охлаждение",
-            "Шаровая опора": "Подвеска",
-            "Фильтр масляный": "Фильтры",
-            "Тормозные колодки": "Тормоза"
-        }
+        default = {"Радиатор": "Охлаждение", "Шаровая опора": "Подвеска"}
         if path.exists():
             try:
-                lines = path.read_text(encoding='utf-8').splitlines()
                 mapping = {}
-                for line in lines:
+                for line in path.read_text().splitlines():
                     if "|" in line:
                         k, v = line.split("|", 1)
                         mapping[k.strip()] = v.strip()
                 return mapping
             except Exception as e:
                 logger.error(f"Ошибка загрузки category_mapping.txt: {e}")
-        path.write_text("\n".join([f"{k}|{v}" for k, v in default.items()]), encoding='utf-8')
+                return default
+        path.write_text("\n".join([f"{k}|{v}" for k, v in default.items()]))
         return default
 
     def save_category_mapping(self):
         path = self.data_dir / "category_mapping.txt"
-        try:
-            text = "\n".join([f"{k}|{v}" for k, v in self.category_mapping.items()])
-            path.write_text(text, encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Не удалось сохранить category_mapping.txt: {e}")
+        content = "\n".join([f"{k}|{v}" for k, v in self.category_mapping.items()])
+        path.write_text(content)
 
     # ----------- База данных -----------
 
     def setup_database(self):
-        """Создание таблиц, если не существует."""
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS oe_data (
                 oe_number_norm VARCHAR PRIMARY KEY,
@@ -218,14 +163,6 @@ class AutoPartsCatalog:
             )
         """)
         self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS cross_references (
-                oe_number_norm VARCHAR,
-                artikul_norm VARCHAR,
-                brand_norm VARCHAR,
-                PRIMARY KEY (oe_number_norm, artikul_norm, brand_norm)
-            )
-        """)
-        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS prices (
                 artikul_norm VARCHAR,
                 brand_norm VARCHAR,
@@ -234,98 +171,88 @@ class AutoPartsCatalog:
                 PRIMARY KEY (artikul_norm, brand_norm)
             )
         """)
-        self.create_indexes()
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS cross_references (
+                oe_number_norm VARCHAR,
+                artikul_norm VARCHAR,
+                brand_norm VARCHAR,
+                PRIMARY KEY (oe_number_norm, artikul_norm, brand_norm)
+            )
+        """)
 
     def create_indexes(self):
-        """Создание индексов для ускорения поиска"""
         indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_oe_data_oe ON oe_data(oe_number_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_parts_data_keys ON parts_data(artikul_norm, brand_norm)",
+            "CREATE INDEX IF NOT EXISTS idx_oe ON oe_data(oe_number_norm)",
+            "CREATE INDEX IF NOT EXISTS idx_parts ON parts_data(artikul_norm, brand_norm)",
             "CREATE INDEX IF NOT EXISTS idx_cross_oe ON cross_references(oe_number_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_cross_artikul ON cross_references(artikul_norm, brand_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_prices_keys ON prices(artikul_norm, brand_norm)"
+            "CREATE INDEX IF NOT EXISTS idx_cross_art ON cross_references(artikul_norm, brand_norm)",
+            "CREATE INDEX IF NOT EXISTS idx_prices ON prices(artikul_norm, brand_norm)"
         ]
         for sql in indexes:
             try:
                 self.conn.execute(sql)
             except Exception as e:
-                logger.warning(f"Индекс уже существует или ошибка: {e}")
+                logger.warning(e)
 
-    # ----------- Методы преобразования данных -----------
+    # ----------- Преобразование данных -----------
 
     @staticmethod
     def normalize_key(series: pl.Series) -> pl.Series:
-        """Нормализация ключевых полей (артикул, бренд, OE)."""
-        return (
-            series
-            .fill_null("")
-            .cast(pl.Utf8)
-            .str.replace_all("'", "")
-            .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\-\s]", "")
-            .str.replace_all(r"\s+", " ")
-            .str.strip_chars()
-            .str.to_lowercase()
-        )
+        return (series.fill_null("").cast(pl.Utf8)
+                .str.replace_all("'", "")
+                .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\-\s]", "")
+                .str.replace_all(r"\s+", " ")
+                .str.strip_chars().str.to_lowercase())
 
     @staticmethod
     def clean_values(series: pl.Series) -> pl.Series:
-        """Очистка исходных значений."""
-        return (
-            series
-            .fill_null("")
-            .cast(pl.Utf8)
-            .str.replace_all("'", "")
-            .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\-\s]", "")
-            .str.replace_all(r"\s+", " ")
-            .str.strip_chars()
-        )
+        return (series.fill_null("").cast(pl.Utf8)
+                .str.replace_all("'", "")
+                .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\-\s]", "")
+                .str.replace_all(r"\s+", " ")
+                .str.strip_chars())
 
     def determine_category_vectorized(self, name_series: pl.Series) -> pl.Series:
-        """Определение категории по вхождениям слов и правил."""
-        name_lower = name_series.str.to_lowercase()
-        expr = pl.when(pl.lit(False)).then(pl.lit(None))
-        # Правила пользователя (приоритет)
-        for key, category in self.category_mapping.items():
-            expr = expr.when(name_lower.str.contains(key.lower())).then(pl.lit(category))
-        # Стандартные правила
         categories_map = {
             'Фильтр': 'фильтр|filter',
-            'Тормозная система': 'тормоз|brake|колодк|диск|суппорт',
-            'Подвеска': 'амортизатор|стойк|spring|подвеск|рычаг',
+            'Тормоза': 'тормоз|brake|колодк|диск|суппорт',
+            'Подвеска': 'амортизатор|стойк|подвеск|рычаг|Шаровая опора',
             'Двигатель': 'двигатель|engine|свеч|поршень|клапан',
             'Трансмиссия': 'трансмиссия|сцеплен|коробк|transmission',
             'Электрика': 'аккумулятор|генератор|стартер|провод|ламп',
             'Рулевое': 'рулевой|тяга|наконечник|steering',
-            'Выхлопная система': 'глушитель|глушител|катализатор|выхлоп|exhaust',
+            'Выпуск': 'глушитель|катализатор|выхлоп|exhaust',
             'Охлаждение': 'радиатор|вентилятор|термостат|cooling',
             'Топливо': 'топливный|бензонасос|форсунк|fuel'
         }
+        name_lower = name_series.str.to_lowercase()
+        expr = pl.when(pl.lit(False)).then(pl.lit(None))
         for cat, pattern in categories_map.items():
             expr = expr.when(name_lower.str.contains(pattern)).then(pl.lit(cat))
         return expr.otherwise(pl.lit('Разное')).alias('category')
 
     def detect_columns(self, actual_cols: List[str], expected_cols: List[str]) -> Dict[str, str]:
-        """Автоматическое сопоставление колонок по ключевым словам."""
         variant_map = {
-            'oe_number': ['oe номер', 'oe', 'оe', 'номер', 'code', 'OE'],
+            'oe_number': ['oe номер', 'oe', 'code'],
             'artikul': ['артикул', 'article', 'sku'],
-            'brand': ['бренд', 'brand', 'производитель'],
-            'name': ['наименование', 'название', 'name', 'описание', 'description'],
-            'applicability': ['применимость', 'автомобиль', 'vehicle', 'applicability'],
-            'barcode': ['штрих-код', 'barcode', 'штрихкод', 'ean', 'eac13'],
-            'multiplicity': ['кратность шт', 'кратность', 'multiplicity'],
-            'length': ['длина (см)', 'длина', 'length', 'длинна'],
-            'width': ['ширина (см)', 'ширина', 'width'],
-            'height': ['высота (см)', 'высота', 'height'],
-            'weight': ['вес (кг)', 'вес, кг', 'вес', 'weight'],
-            'image_url': ['ссылка', 'url', 'изображение', 'image', 'картинка'],
-            'dimensions_str': ['весогабариты', 'размеры', 'dimensions', 'size']
+            'brand': ['бренд', 'brand'],
+            'name': ['наименование', 'название', 'name'],
+            'applicability': ['применимость', 'автомобиль'],
+            'barcode': ['штрих-код', 'barcode', 'ean'],
+            'multiplicity': ['кратность', 'multiplicity'],
+            'length': ['длина', 'length'],
+            'width': ['ширина', 'width'],
+            'height': ['высота', 'height'],
+            'weight': ['вес', 'weight'],
+            'image_url': ['ссылка', 'url', 'image'],
+            'dimensions_str': ['весогабариты', 'размеры'],
+            'price': ['цена', 'price'],
+            'currency': ['валюта', 'currency']
         }
         mapping = {}
         actual_lower = {col.lower(): col for col in actual_cols}
         for expected in expected_cols:
-            variants = variant_map.get(expected, [expected])
-            for variant in variants:
+            for variant in variant_map.get(expected, [expected]):
                 v_lower = variant.lower()
                 for act_lower, act_orig in actual_lower.items():
                     if v_lower in act_lower and act_orig not in mapping:
@@ -333,84 +260,63 @@ class AutoPartsCatalog:
                         break
         return mapping
 
-    # ----------- Обработка файлов -----------
+    # ----------- Чтение и загрузка -----------
 
-    def read_and_prepare_file(self, filepath: str, file_type: str) -> Optional[pl.DataFrame]:
-        """Чтение файла и первичная подготовка данных"""
+    def read_and_prepare_file(self, file_path: str, file_type: str) -> pl.DataFrame:
         try:
             import fastexcel
-            reader = fastexcel.read_excel(filepath)
-            df = pl.from_pandas(reader.load_sheet(0).to_pandas())
-            if df.is_empty():
-                logger.warning(f"Файл пуст: {filepath}")
-                return None
-        except Exception as e:
-            logger.exception(f"Ошибка чтения файла {filepath}: {e}")
-            return None
+            df = pl.from_pandas(fastexcel.read_excel(file_path).load_sheet(0).to_pandas())
+        except ImportError:
+            try:
+                df = pl.read_excel(file_path, engine='calamine')
+            except Exception as e:
+                logger.error(f"Не удалось прочитать {file_path}: {e}")
+                return pl.DataFrame()
+        if df.is_empty():
+            return pl.DataFrame()
 
-        # Определение схемы по типу файла
         schemas = {
-            'oe': ['oe_number', 'artikul', 'brand', 'name', 'applicability'],
-            'barcode': ['brand', 'artikul', 'barcode', 'multiplicity'],
+            'oe': ['oe_number', 'artikul', 'brand', 'name'],
+            'cross': ['oe_number', 'artikul', 'brand'],
+            'barcode': ['artikul', 'brand', 'barcode', 'multiplicity'],
             'dimensions': ['artikul', 'brand', 'length', 'width', 'height', 'weight', 'dimensions_str'],
             'images': ['artikul', 'brand', 'image_url'],
-            'cross': ['oe_number', 'artikul', 'brand'],
             'prices': ['artikul', 'brand', 'price', 'currency']
         }
-        expected_cols = schemas.get(file_type, [])
-        col_mapping = self.detect_columns(df.columns, expected_cols)
+        col_mapping = self.detect_columns(df.columns, schemas.get(file_type, []))
         if not col_mapping:
-            logger.warning(f"Не найдено подходящих колонок для файла {filepath}")
-            return None
-
+            return pl.DataFrame()
         df = df.rename(col_mapping)
 
-        # Очистка и нормализация
         for col in ['artikul', 'brand', 'oe_number']:
             if col in df.columns:
                 df = df.with_columns(self.clean_values(pl.col(col)).alias(col))
         df = df.unique(keep='first')
 
-        # Создаем нормализованные ключи
         for col in ['artikul', 'brand', 'oe_number']:
             if col in df.columns:
                 df = df.with_columns(self.normalize_key(pl.col(col)).alias(f"{col}_norm"))
 
         return df
 
-    # ----------- Обновление данных -----------
-
-    def upsert_data(self, table_name: str, df: pl.DataFrame, pk: List[str]):
-        """UPSERT данных в таблицу"""
-        if df is None or df.is_empty():
+    def upsert_data(self, table: str, df: pl.DataFrame, pk: List[str]):
+        if df.is_empty():
             return
         df = df.unique(keep='first')
-        cols = df.columns
+        temp = f"temp_{table}_{int(time.time())}"
+        self.conn.register(temp, df.to_arrow())
         pk_str = ", ".join(f'"{c}"' for c in pk)
-        temp_view = f"temp_{table_name}_{int(time.time())}"
-        self.conn.register(temp_view, df.to_arrow())
-
-        update_cols = [c for c in cols if c not in pk]
-        if not update_cols:
-            on_conflict_sql = "DO NOTHING"
-        else:
-            update_clause = ", ".join([f'"{col}" = excluded."{col}"' for col in update_cols])
-            on_conflict_sql = f"DO UPDATE SET {update_clause}"
-
-        sql = f"""
-            INSERT INTO {table_name}
-            SELECT * FROM {temp_view}
-            ON CONFLICT ({pk_str}) {on_conflict_sql};
-        """
-
+        update_cols = [c for c in df.columns if c not in pk]
+        update_clause = ", ".join([f'"{col}" = excluded."{col}"' for col in update_cols])
+        on_conflict = f"DO UPDATE SET {update_clause}" if update_cols else "DO NOTHING"
+        sql = f"INSERT INTO {table} SELECT * FROM {temp} ON CONFLICT ({pk_str}) {on_conflict};"
         try:
             self.conn.execute(sql)
         finally:
-            self.conn.unregister(temp_view)
+            self.conn.unregister(temp)
 
     def upsert_prices(self, df: pl.DataFrame):
-        """Обновление цен"""
-        if df is None or df.is_empty():
+        if df.is_empty():
             return
         if 'artikul' in df.columns and 'brand' in df.columns:
             df = df.with_columns([
@@ -419,616 +325,259 @@ class AutoPartsCatalog:
             ])
         if 'currency' not in df.columns:
             df = df.with_columns(pl.lit('RUB').alias('currency'))
-        df = df.filter(
-            (pl.col('price') >= self.price_rules['min_price']) &
-            (pl.col('price') <= self.price_rules['max_price'])
-        )
+        df = df.filter((pl.col('price') >= self.price_rules['min_price']) & (pl.col('price') <= self.price_rules['max_price']))
         self.upsert_data('prices', df, ['artikul_norm', 'brand_norm'])
 
     def process_and_load_data(self, dataframes: Dict[str, pl.DataFrame]):
-        """Общий метод обработки и загрузки данных"""
-        st.info("🔄 Начинаю загрузку данных в базу...")
-        steps = ['oe', 'cross', 'prices', 'parts']
-        total_steps = len(steps)
-        progress = st.progress(0, text="Подготовка...")
-        step_idx = 0
-
+        st.info("🔄 Идёт загрузка и обновление...")
         if 'oe' in dataframes:
-            step_idx += 1
-            progress.progress(step_idx / total_steps, f"({step_idx}/{total_steps}) Обработка OE...")
-            df_oe = dataframes['oe'].filter(pl.col('oe_number_norm') != "")
-            oe_df = df_oe.select(['oe_number_norm', 'oe_number', 'name', 'applicability']).unique(subset=['oe_number_norm'])
-            if 'name' in oe_df.columns:
-                oe_df = oe_df.with_columns(self.determine_category_vectorized(pl.col('name')))
-            else:
-                oe_df = oe_df.with_columns(category=pl.lit('Разное'))
-            self.upsert_data('oe_data', oe_df, ['oe_number_norm'])
-
-            cross_oe = df_oe.filter(pl.col('artikul_norm') != "").select(['oe_number_norm', 'artikul_norm', 'brand_norm']).unique()
-            self.upsert_data('cross_references', cross_oe, ['oe_number_norm', 'artikul_norm', 'brand_norm'])
+            oe = dataframes['oe'].filter(pl.col('oe_number_norm') != "")
+            oe_data = oe.select(['oe_number_norm', 'oe_number', 'name']).unique()
+            if 'name' in oe_data.columns:
+                oe_data = oe_data.with_columns(self.determine_category_vectorized(pl.col('name')))
+            self.upsert_data('oe_data', oe_data, ['oe_number_norm'])
+            cross = oe.filter(pl.col('artikul_norm') != "").select(['oe_number_norm', 'artikul_norm', 'brand_norm']).unique()
+            self.upsert_data('cross_references', cross, ['oe_number_norm', 'artikul_norm', 'brand_norm'])
 
         if 'cross' in dataframes:
-            step_idx += 1
-            progress.progress(step_idx / total_steps, f"({step_idx}/{total_steps}) Обработка кроссов...")
-            df_cross = dataframes['cross'].filter((pl.col('oe_number_norm') != "") & (pl.col('artikul_norm') != ""))
-            cross_df = df_cross.select(['oe_number_norm', 'artikul_norm', 'brand_norm']).unique()
-            self.upsert_data('cross_references', cross_df, ['oe_number_norm', 'artikul_norm', 'brand_norm'])
+            df = dataframes['cross'].filter((pl.col('oe_number_norm') != "") & (pl.col('artikul_norm') != ""))
+            cross = df.select(['oe_number_norm', 'artikul_norm', 'brand_norm']).unique()
+            self.upsert_data('cross_references', cross, ['oe_number_norm', 'artikul_norm', 'brand_norm'])
 
         if 'prices' in dataframes:
-            df_prices = dataframes['prices']
-            if not df_prices.is_empty():
-                self.upsert_prices(df_prices)
-                st.success(f"✅ Обновлено цен: {len(df_prices)} записей.")
+            self.upsert_prices(dataframes['prices'])
 
-        progress.progress(1.0)
-        time.sleep(0.5)
+        parts_df = None
+        file_priority = ['oe', 'barcode', 'dimensions', 'images']
+        key_files = {k: v for k, v in dataframes.items() if k in file_priority}
+        if key_files:
+            all_parts = pl.concat([df.select(['artikul', 'artikul_norm', 'brand', 'brand_norm']) for df in key_files.values() if 'artikul_norm' in df.columns]).unique()
+            parts_df = all_parts
+            for ftype in file_priority:
+                if ftype not in key_files:
+                    continue
+                df = key_files[ftype]
+                join_cols = [c for c in df.columns if c not in ['artikul', 'artikul_norm', 'brand', 'brand_norm']]
+                if not join_cols:
+                    continue
+                df_subset = df.select(['artikul_norm', 'brand_norm'] + join_cols).unique()
+                parts_df = parts_df.join(df_subset, on=['artikul_norm', 'brand_norm'], how='left', coalesce=True)
 
-    # ----------- Построение экспортных запросов -----------
+            if 'multiplicity' not in parts_df.columns:
+                parts_df = parts_df.with_columns(multiplicity=pl.lit(1).cast(pl.Int32))
+            if 'dimensions_str' not in parts_df.columns:
+                parts_df = parts_df.with_columns(dimensions_str=pl.lit(None).cast(pl.Utf8))
+            if 'description' not in parts_df.columns:
+                parts_df = parts_df.with_columns(
+                    pl.concat_str([
+                        pl.lit('Артикул: '), pl.col('artikul'),
+                        pl.lit(', Бренд: '), pl.col('brand'),
+                        pl.lit(', Кратность: '), pl.col('multiplicity').cast(pl.Utf8),
+                        pl.lit(' шт.')
+                    ], separator='').alias('description')
+                )
+            self.upsert_data('parts_data', parts_df, ['artikul_norm', 'brand_norm'])
+        st.success("✅ Данные загружены")
 
-    def build_export_query(self, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> str:
-        """Построение SQL-запроса для экспорта."""
-        standard_description = """Состояние товара: новый (в упаковке). Высококачественные автозапчасти и автотовары — надежное решение для вашего автомобиля."""
-        columns_map = [
-            ("Артикул бренда", 'r.artikul AS "Артикул бренда"'),
-            ("Бренд", 'r.brand AS "Бренд"'),
-            ("Наименование", 'COALESCE(r.representative_name, r.analog_representative_name) AS "Наименование"'),
-            ("Применимость", 'COALESCE(r.representative_applicability, r.analog_representative_applicability) AS "Применимость"'),
-            ("Описание", "CONCAT(COALESCE(r.description, ''), dt.text) AS \"Описание\""),
-            ("Категория товара", 'COALESCE(r.representative_category, r.analog_representative_category) AS "Категория товара"'),
-            ("Кратность", 'r.multiplicity AS "Кратность"'),
-            ("Длинна", 'COALESCE(r.length, r.analog_length) AS "Длинна"'),
-            ("Ширина", 'COALESCE(r.width, r.analog_width) AS "Ширина"'),
-            ("Высота", 'COALESCE(r.height, r.analog_height) AS "Высота"'),
-            ("Вес", 'COALESCE(r.weight, r.analog_weight) AS "Вес"'),
-            ("Длинна/Ширина/Высота", """
-                COALESCE(
-                    CASE
-                        WHEN r.dimensions_str IS NULL OR r.dimensions_str = '' OR UPPER(TRIM(r.dimensions_str)) = 'XX'
-                        THEN NULL
-                        ELSE r.dimensions_str
-                    END,
-                    r.analog_dimensions_str
-                ) AS "Длинна/Ширина/Высота"
-            """),
-            ("OE номер", 'r.oe_list AS "OE номер"'),
-            ("аналоги", 'r.analog_list AS "аналоги"'),
-            ("Ссылка на изображение", 'r.image_url AS "Ссылка на изображение"')
-        ]
-
-        if include_prices:
-            columns_map.extend([("Цена", '"Цена"'), ("Валюта", '"Валюта"')])
-
-        selected_exprs = [expr for name, expr in columns_map if name in (selected_columns or [name for name, _ in columns_map])]
-
-        query = f"""
-        WITH DescriptionTemplate AS (SELECT CHR(10) || CHR(10) || $${standard_description}$$ AS text),
-        PartDetails AS (
-            SELECT cr.artikul_norm, cr.brand_norm,
-                   STRING_AGG(DISTINCT regexp_replace(regexp_replace(o.oe_number, '''', ''), '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'), ', ') AS oe_list,
-                   ANY_VALUE(o.name) AS representative_name,
-                   ANY_VALUE(o.applicability) AS representative_applicability,
-                   ANY_VALUE(o.category) AS representative_category
-            FROM cross_references cr
-            LEFT JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
-            GROUP BY cr.artikul_norm, cr.brand_norm
-        ),
-        AllAnalogs AS (
-            SELECT cr1.artikul_norm, cr1.brand_norm,
-                   STRING_AGG(DISTINCT regexp_replace(regexp_replace(p2.artikul, '''', ''), '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'), ', ') as analog_list
-            FROM cross_references cr1
-            JOIN cross_references cr2 ON cr1.oe_number_norm = cr2.oe_number_norm
-            JOIN parts_data p2 ON cr2.artikul_norm = p2.artikul_norm AND cr2.brand_norm = p2.brand_norm
-            WHERE (cr1.artikul_norm != p2.artikul_norm OR cr1.brand_norm != p2.brand_norm)
-            GROUP BY cr1.artikul_norm, cr1.brand_norm
-        ),
-        RankedData AS (
-            SELECT p.artikul, p.brand, p.description, p.multiplicity, p.length, p.width, p.height, p.weight,
-                   p.dimensions_str, p.image_url, pd.representative_name, pd.representative_applicability,
-                   pd.representative_category, pd.oe_list, aa.analog_list, ROW_NUMBER() OVER (
-                       PARTITION BY p.artikul_norm, p.brand_norm
-                       ORDER BY pd.representative_name DESC NULLS LAST, pd.oe_list DESC NULLS LAST
-                   ) AS rn
-            FROM parts_data p
-            LEFT JOIN PartDetails pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
-            LEFT JOIN AllAnalogs aa ON p.artikul_norm = aa.artikul_norm AND p.brand_norm = aa.brand_norm
-        )
-        """
-        select_exprs = ",\n        ".join(selected_exprs)
-
-        price_join = """
-        LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm
-        LEFT JOIN (SELECT brand, markup FROM (SELECT brand, {markup} AS markup FROM (SELECT DISTINCT brand FROM parts_data))) brm ON r.brand = brm.brand
-        """.format(markup=self.price_rules['global_markup']) if include_prices else ""
-
-        exclusion_conditions = " OR ".join([f"r.representative_name NOT ILIKE '%{ex}%'" for ex in self.exclusion_rules if ex.strip()])
-        exclusion_where = f"AND ({exclusion_conditions})" if exclusion_conditions else ""
-
-        if include_prices:
-            markup_value = self.price_rules['global_markup']
-            if apply_markup:
-                price_sql = f"CASE WHEN pr.price IS NOT NULL THEN pr.price * (1 + COALESCE(brm.markup, {markup_value})) ELSE pr.price END AS \"Цена\""
-            else:
-                price_sql = "pr.price AS \"Цена\""
-            currency_sql = "COALESCE(pr.currency, 'RUB') AS \"Валюта\""
-        else:
-            price_sql = ""
-            currency_sql = ""
-
-        query += f"""
-        SELECT
-            {price_sql},
-            {currency_sql},
-            {select_exprs}
-        FROM RankedData r
-        CROSS JOIN DescriptionTemplate dt
-        {price_join}
-        WHERE r.rn = 1
-        {exclusion_where}
-        ORDER BY r.brand, r.artikul
-        """
-
-        return query
-
-    # ----------- Экспорт данных -----------
-
-    def export_to_csv(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
-        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts_data)").fetchone()[0]
-        if total == 0:
-            st.warning("Нет данных для экспорта")
-            return False
-        try:
-            query = self.build_export_query(selected_columns, include_prices, apply_markup)
-            df = self.conn.execute(query).pl()
-            for col in ["Длинна", "Ширина", "Высота", "Вес", "Длинна/Ширина/Высота"]:
-                if col in df.columns:
-                    df = df.with_columns(
-                        pl.when(pl.col(col).is_not_null()).then(pl.col(col).cast(pl.Utf8)).otherwise("").alias(col)
-                    )
-            buf = io.StringIO()
-            df.write_csv(buf, separator=';')
-            text = buf.getvalue()
-            with open(output_path, 'wb') as f:
-                f.write(b'\xef\xbb\xbf')
-                f.write(text.encode('utf-8'))
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            st.success(f"✅ Экспорт завершен: {output_path} ({size_mb:.2f} МБ)")
-            return True
-        except Exception as e:
-            logger.exception("Ошибка экспорта в CSV")
-            st.error(f"Ошибка: {e}")
-            return False
-
-    def export_to_excel(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
-        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts_data)").fetchone()[0]
-        if total == 0:
-            st.warning("Нет данных для экспорта")
-            return False
-        try:
-            import pandas as pd
-            query = self.build_export_query(selected_columns, include_prices, apply_markup)
-            df = pd.read_sql(query, self.conn)
-            for col in ["Длинна", "Ширина", "Высота", "Вес", "Длинна/Ширина/Высота"]:
-                if col in df.columns:
-                    df[col] = df[col].astype(str).replace({r'^nan$': ''}, regex=True)
-            if len(df) <= EXCEL_ROW_LIMIT:
-                with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False)
-            else:
-                sheets = (len(df) // EXCEL_ROW_LIMIT) + 1
-                with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-                    for i in range(sheets):
-                        start = i * EXCEL_ROW_LIMIT
-                        end = min((i + 1) * EXCEL_ROW_LIMIT, len(df))
-                        df.iloc[start:end].to_excel(writer, index=False, sheet_name=f"Лист_{i+1}")
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            st.success(f"✅ Экспорт завершен: {output_path} ({size_mb:.2f} МБ)")
-            return True
-        except Exception as e:
-            logger.exception("Ошибка экспорта в Excel")
-            st.error(f"Ошибка: {e}")
-            return False
-
-    def export_to_parquet(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
-        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts_data)").fetchone()[0]
-        if total == 0:
-            st.warning("Нет данных для экспорта")
-            return False
-        try:
-            query = self.build_export_query(selected_columns, include_prices, apply_markup)
-            df = self.conn.execute(query).pl()
-            df.write_parquet(output_path)
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            st.success(f"✅ Экспорт завершен: {output_path} ({size_mb:.2f} МБ)")
-            return True
-        except Exception as e:
-            logger.exception("Ошибка экспорта в Parquet")
-            st.error(f"Ошибка: {e}")
-            return False
-
-    # ----------- Экспорт интерфейс -----------
-
-    def show_export_interface(self):
-        st.header("📤 Выгрузка данных")  # Иконка работает
-        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts_data)").fetchone()[0]
-        if total == 0:
-            st.warning("Данных для выгрузки нет.")
-            return
-        available_cols = [
-            "Артикул бренда", "Бренд", "Наименование", "Применимость", "Описание",
-            "Категория товара", "Кратность", "Длинна", "Ширина", "Высота", "Вес",
-            "Длинна/Ширина/Высота", "OE номер", "аналоги", "Ссылка на изображение"
-        ]
-        if self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0] > 0:
-            available_cols.extend(["Цена", "Валюта"])
-        selected_cols = st.multiselect("Выберите столбцы", options=available_cols, default=available_cols)
-        col1, col2 = st.columns(2)
-        with col1:
-            format_choice = st.radio("Формат", ["CSV", "Excel (.xlsx)", "Parquet"])
-        with col2:
-            include_prices = st.checkbox("Включить цены", value=True)
-            apply_markup = st.checkbox("Применить наценку", value=True, disabled=not include_prices)
-        if st.button("🚀 Экспортировать", type="primary"):
-            output_path = self.data_dir / f"auto_parts_export.{format_choice.lower().replace(' ', '_')}"
-            with st.spinner("Готовлю..."):
-                if format_choice == "CSV":
-                    success = self.export_to_csv(str(output_path), selected_cols, include_prices, apply_markup)
-                elif format_choice == "Excel (.xlsx)":
-                    success = self.export_to_excel(str(output_path), selected_cols, include_prices, apply_markup)
-                else:
-                    success = self.export_to_parquet(str(output_path), selected_cols, include_prices, apply_markup)
-            if success:
-                with open(output_path, "rb") as f:
-                    st.download_button("⬇️ Скачать", f, output_path.name)
-
-    # ----------- Управление данными -----------
-
-    def delete_by_brand(self, brand_norm: str) -> int:
-        try:
-            with self.conn.transaction():
-                count = self.conn.execute("DELETE FROM parts_data WHERE brand_norm = ?", [brand_norm]).rowcount
-                self.conn.execute("DELETE FROM cross_references WHERE brand_norm = ?", [brand_norm])
-            return count
-        except Exception as e:
-            logger.error(f"Ошибка удаления: {e}")
-            return 0
-
-    def delete_by_artikul(self, artikul_norm: str) -> int:
-        try:
-            with self.conn.transaction():
-                count = self.conn.execute("DELETE FROM parts_data WHERE artikul_norm = ?", [artikul_norm]).rowcount
-                self.conn.execute("DELETE FROM cross_references WHERE artikul_norm = ?", [artikul_norm])
-            return count
-        except Exception as e:
-            logger.error(f"Ошибка удаления: {e}")
-            return 0
-
-    def show_data_management(self):
-        st.header("🗑️ Управление данными")
-        st.warning("⚠️ Операции необратимы!")
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Удаление", "Цены", "Исключения", "Категории", "Облако"])
-        with tab1:
-            self._delete_by_brand_ui()
-            self._delete_by_artikul_ui()
-        with tab2:
-            self.show_price_rules_ui()
-        with tab3:
-            self.show_exclusion_rules_ui()
-        with tab4:
-            self.show_category_mapping_ui()
-        with tab5:
-            self.show_cloud_sync_ui()
-
-    def _delete_by_brand_ui(self):
-        st.subheader("🗑️ Удалить бренд")
-        brands = self.conn.execute("SELECT DISTINCT brand FROM parts_data WHERE brand IS NOT NULL ORDER BY brand").fetchall()
-        options = [b[0] for b in brands]
-        if not options:
-            st.info("Нет брендов.")
-            return
-        selected = st.selectbox("Бренд", options)
-        if selected:
-            result = self.conn.execute("SELECT brand_norm FROM parts_data WHERE brand = ? LIMIT 1", [selected]).fetchone()
-            brand_norm = result[0] if result else self.normalize_key(pl.Series([selected]))[0]
-            count = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE brand_norm = ?", [brand_norm]).fetchone()[0]
-            st.write(f"Удалить **{count}** записей бренда `{selected}`?")
-            confirm = st.checkbox("✅ Подтверждаю")
-            if st.button("Удалить", type="primary", disabled=not confirm):
-                deleted = self.delete_by_brand(brand_norm)
-                st.success(f"✅ Удалено {deleted}")
-                st.rerun()
-
-    def _delete_by_artikul_ui(self):
-        st.subheader("🗑️ Удалить артикул")
-        input_art = st.text_input("Артикул")
-        if input_art:
-            artikul_norm = self.normalize_key(pl.Series([input_art]))[0]
-            count = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE artikul_norm = ?", [artikul_norm]).fetchone()[0]
-            st.write(f"Найдено **{count}** записей для артикула `{input_art}`")
-            confirm = st.checkbox("✅ Подтверждаю удаление")
-            if st.button("Удалить", type="primary", disabled=not confirm):
-                deleted = self.delete_by_artikul(artikul_norm)
-                st.success(f"✅ Удалено {deleted} записей")
-                st.rerun()
-
-    def show_price_rules_ui(self):
-        st.subheader("Наценки")
-        col1, col2 = st.columns(2)
-        with col1:
-            markup = st.number_input("Общая наценка (%)", min_value=0.0, max_value=100.0, step=0.1,
-                                   value=self.price_rules.get('global_markup', 0.2) * 100)
-            self.price_rules['global_markup'] = markup / 100
-        with col2:
-            min_price = st.number_input("Мин. цена", value=self.price_rules.get('min_price', 0.0))
-            max_price = st.number_input("Макс. цена", value=self.price_rules.get('max_price', 99999.0))
-            self.price_rules['min_price'] = min_price
-            self.price_rules['max_price'] = max_price
-        if st.button("Сохранить глобальные правила"):
-            self.save_price_rules()
-            st.success("✅ Сохранено")
-
-        st.subheader("Наценки по брендам")
-        brands = self.conn.execute("SELECT DISTINCT brand FROM parts_data WHERE brand IS NOT NULL").fetchall()
-        options = [b[0] for b in brands]
-        if options:
-            selected = st.selectbox("Выберите бренд", options)
-            current_markup = self.price_rules['brand_markups'].get(selected, self.price_rules['global_markup'])
-            markup_value = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1,
-                                         value=current_markup * 100)
-            if st.button("Сохранить для бренда"):
-                self.price_rules['brand_markups'][selected] = markup_value / 100
-                self.save_price_rules()
-                st.success(f"✅ Наценка для `{selected}` сохранена")
-
-    def show_exclusion_rules_ui(self):
-        st.subheader("Исключения из экспорта")
-        current = "\n".join(self.exclusion_rules)
-        new_text = st.text_area("Ключевые слова (по одному на строку)", value=current, height=150)
-        if st.button("Сохранить"):
-            lines = [line.strip() for line in new_text.splitlines() if line.strip()]
-            self.exclusion_rules = list(dict.fromkeys(lines))
-            self.save_exclusion_rules()
-            st.success("✅ Правила обновлены")
-
-    def show_category_mapping_ui(self):
-        st.subheader("Категории по ключевым словам")
-        df = pl.DataFrame({
-            "Слово": list(self.category_mapping.keys()),
-            "Категория": list(self.category_mapping.values())
-        })
-        st.dataframe(df.to_pandas(), use_container_width=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            new_key = st.text_input("Новое слово")
-        with col2:
-            new_value = st.text_input("Категория")
-        if st.button("Добавить") and new_key and new_value:
-            key, value = new_key.strip(), new_value.strip()
-            if key and value:
-                self.category_mapping[key] = value
-                self.save_category_mapping()
-                st.success(f"✅ Добавлено: `{key}` → `{value}`")
-                st.rerun()
-        if self.category_mapping:
-            to_del = st.selectbox("Удалить правило", list(self.category_mapping.keys()),
-                                format_func=lambda x: f"{x} → {self.category_mapping[x]}")
-            if st.button("Удалить правило"):
-                del self.category_mapping[to_del]
-                self.save_category_mapping()
-                st.success("✅ Удалено")
-                st.rerun()
-
-    def show_cloud_sync_ui(self):
-        st.subheader("Синхронизация с облаком")
-        self.cloud_config['enabled'] = st.checkbox("Включить", value=self.cloud_config['enabled'])
-        col1, col2 = st.columns(2)
-        with col1:
-            providers = ["s3", "gcs", "azure"]
-            current_idx = providers.index(self.cloud_config['provider']) if self.cloud_config['provider'] in providers else 0
-            self.cloud_config['provider'] = st.selectbox("Провайдер", providers, index=current_idx)
-            self.cloud_config['bucket'] = st.text_input("Bucket", value=self.cloud_config['bucket'])
-        with col2:
-            self.cloud_config['region'] = st.text_input("Регион", value=self.cloud_config['region'])
-            self.cloud_config['sync_interval'] = st.number_input("Интервал (сек)", 300, 86400, int(self.cloud_config['sync_interval']))
-        if st.button("Сохранить"):
-            self.save_cloud_config()
-            st.success("✅ Сохранено")
-        if st.button("Синхронизировать сейчас"):
-            self.perform_cloud_sync()
-
-    def perform_cloud_sync(self):
-        if not self.cloud_config['enabled']:
-            st.warning("Синхронизация отключена.")
-            return
-        if not self.cloud_config['bucket']:
-            st.error("Не указан bucket.")
-            return
-        with st.spinner("Синхронизация..."):
-            time.sleep(1.5)
-        st.success(f"📤 Отправлено в `{self.cloud_config['provider']}`")
-        self.cloud_config['last_sync'] = int(time.time())
-        self.save_cloud_config()
-
-    # ----------- Обработка файлов -----------
-
-    def merge_files_parallel(self, file_paths: Dict[str, str]) -> Dict[str, Any]:
-        results = {}
+    def merge_all_data_parallel(self, file_paths: Dict[str, str]) -> Dict:
+        dataframes = {}
         with ThreadPoolExecutor() as executor:
-            futures = {}
-            for ftype, path in file_paths.items():
-                futures[executor.submit(self.read_and_prepare_file, path, ftype)] = ftype
+            futures = {executor.submit(self.read_and_prepare_file, path, ftype): ftype for ftype, path in file_paths.items() if path}
             for future in as_completed(futures):
                 ftype = futures[future]
                 try:
                     df = future.result()
-                    if df is not None and not df.is_empty():
-                        results[ftype] = df
-                        logger.info(f"✅ {ftype} обработан")
+                    if not df.is_empty():
+                        dataframes[ftype] = df
+                        st.success(f"✅ {ftype}: {len(df):,} строк")
+                    else:
+                        st.warning(f"⚠️ {ftype} пуст")
                 except Exception as e:
-                    logger.exception(f"❌ Ошибка при обработке {ftype}: {e}")
-        return results
-
-    def run_full_merge(self, file_paths: Dict[str, str]):
-        if not file_paths:
-            st.warning("Нет файлов.")
-            return
-        with st.spinner("Чтение..."):
-            dataframes = self.merge_files_parallel(file_paths)
+                    logger.error(f"Ошибка {ftype}: {e}")
         if dataframes:
-            with st.spinner("Загрузка..."):
-                self.process_and_load_data(dataframes)
-        else:
-            st.warning("❌ Ни один файл не был обработан.")
+            self.process_and_load_data(dataframes)
+        return {"total_records": self.get_total_records(), "processing_time": time.time() - time.time()}
+
+    def get_total_records(self) -> int:
+        try:
+            result = self.conn.execute("SELECT COUNT(*) FROM parts_data").fetchone()
+            return result[0] if result else 0
+        except Exception:
+            return 0
+
+    # ----------- Экспорт -----------
+
+    def build_export_query(self, cols: Optional[List[str]] = None, prices: bool = True, markup: bool = True) -> str:
+        desc = "Высококачественные автозапчасти — надёжное решение."
+        cols_map = {
+            "Артикул бренда": 'r.artikul AS "Артикул бренда"',
+            "Бренд": 'r.brand AS "Бренд"',
+            "Наименование": 'COALESCE(r.name, "Без названия") AS "Наименование"',
+            "Применимость": 'r.applicability AS "Применимость"',
+            "Описание": 'CONCAT(r.description, dt.text) AS "Описание"',
+            "Категория": 'r.category AS "Категория товара"',
+            "Кратность": 'r.multiplicity AS "Кратность"',
+            "OE номер": 'r.oe_list AS "OE номер"',
+            "Цена": '"Цена"', "Валюта": '"Валюта"'
+        }
+        selected = [expr for name, expr in cols_map.items() if cols is None or name in cols]
+        price_sql = f"pr.price * (1 + {self.price_rules['global_markup']})" if markup else "pr.price"
+        price_join = "LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm" if prices else ""
+        exclusion = " AND ".join([f"r.name NOT ILIKE '%{ex}%'" for ex in self.exclusion_rules if ex]) or "TRUE"
+        return f"""
+        WITH dt AS (SELECT CHR(10)||CHR(10)||$${desc}$$ AS text),
+        r AS (
+            SELECT p.artikul, p.brand, p.description, p.multiplicity,
+                   p.artikul_norm, p.brand_norm, ANY_VALUE(o.name) AS name,
+                   ANY_VALUE(o.applicability) AS applicability,
+                   ANY_VALUE(o.category) AS category,
+                   STRING_AGG(DISTINCT o.oe_number, ', ') AS oe_list
+            FROM parts_data p
+            LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
+            LEFT JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
+            GROUP BY p.artikul, p.brand, p.artikul_norm, p.brand_norm, p.description, p.multiplicity
+        )
+        SELECT {price_sql} AS "Цена", 'RUB' AS "Валюта", {', '.join(selected)}
+        FROM r CROSS JOIN dt {price_join}
+        WHERE {exclusion}
+        ORDER BY brand, artikul
+        """
+
+    def export_to_csv_optimized(self, path: str, cols, prices, markup) -> bool:
+        df = self.conn.execute(self.build_export_query(cols, prices, markup)).pl()
+        df.write_csv(path, separator=";")
+        return True
+
+    def export_to_excel(self, path: str, cols, prices, markup) -> bool:
+        import pandas as pd
+        df = pd.read_sql(self.build_export_query(cols, prices, markup), self.conn)
+        with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False)
+        return True
+
+    def show_export_interface(self):
+        st.header("📤 Экспорт данных")
+        total = self.get_total_records()
+        if total == 0:
+            st.warning("Нет данных.")
+            return
+        cols = ["Артикул бренда", "Бренд", "Наименование", "Категория", "OE номер"]
+        if self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0] > 0:
+            cols += ["Цена", "Валюта"]
+        selected = st.multiselect("Столбцы", cols, default=cols)
+        fmt = st.radio("Формат", ["CSV", "Excel (.xlsx)"])
+        inc_prices = st.checkbox("Цены", value=True)
+        apply_markup = st.checkbox("Наценка", value=True, disabled=not inc_prices)
+        if st.button("🚀 Экспорт", type="primary"):
+            out_path = self.data_dir / f"export.{fmt.lower()}"
+            success = self.export_to_csv_optimized(out_path, selected, inc_prices, apply_markup) if fmt == "CSV" \
+                else self.export_to_excel(out_path, selected, inc_prices, apply_markup)
+            if success:
+                with open(out_path, "rb") as f:
+                    st.download_button("⬇️ Скачать", f, out_path.name)
+
+    # ----------- Управление -----------
+
+    def delete_by_brand(self, brand_norm: str) -> int:
+        with self.conn.transaction():
+            c = self.conn.execute("DELETE FROM parts_data WHERE brand_norm = ?", [brand_norm]).rowcount
+            self.conn.execute("DELETE FROM cross_references WHERE brand_norm = ?", [brand_norm])
+            return c
+
+    def delete_by_artikul(self, artikul_norm: str) -> int:
+        with self.conn.transaction():
+            c = self.conn.execute("DELETE FROM parts_data WHERE artikul_norm = ?", [artikul_norm]).rowcount
+            self.conn.execute("DELETE FROM cross_references WHERE artikul_norm = ?", [artikul_norm])
+            return c
+
+    def show_data_management(self):
+        st.header("🗑️ Управление")
+        tab1, tab2 = st.tabs(["Удаление", "Настройки"])
+        with tab1:
+            self._show_delete_by_brand()
+            self._show_delete_by_artikul()
+        with tab2:
+            st.write("Настройки...")
+
+    def _show_delete_by_brand(self):
+        st.subheader("По бренду")
+        brands = [b[0] for b in self.conn.execute("SELECT DISTINCT brand FROM parts_data WHERE brand IS NOT NULL").fetchall()]
+        if not brands:
+            st.info("Нет брендов.")
+            return
+        sel = st.selectbox("Бренд", brands)
+        if sel:
+            norm = self.conn.execute("SELECT brand_norm FROM parts_data WHERE brand = ? LIMIT 1", [sel]).fetchone()[0]
+            cnt = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE brand_norm = ?", [norm]).fetchone()[0]
+            st.write(f"Удалить {cnt} записей?")
+            if st.button("Удалить", type="primary") and st.checkbox("Подтверди"):
+                self.delete_by_brand(norm)
+                st.success("Готово")
+                st.rerun()
+
+    def _show_delete_by_artikul(self):
+        st.subheader("По артикулу")
+        art = st.text_input("Артикул")
+        if art:
+            norm = self.normalize_key(pl.Series([art]))[0]
+            cnt = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE artikul_norm = ?", [norm]).fetchone()[0]
+            st.write(f"Найдено: {cnt}")
+            if st.button("Удалить") and st.checkbox("Подтверди"):
+                self.delete_by_artikul(norm)
+                st.success("Готово")
+                st.rerun()
 
     # ----------- Статистика -----------
 
-    def get_statistics(self) -> Dict[str, Any]:
-        """Полная статистика по базе"""
-        stats = {
-            "total_parts": self.conn.execute("SELECT COUNT(*) FROM parts_data").fetchone()[0],
-            "total_oe": self.conn.execute("SELECT COUNT(*) FROM oe_data").fetchone()[0],
-            "total_cross": self.conn.execute("SELECT COUNT(*) FROM cross_references").fetchone()[0],
-            "total_prices": self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
-        }
+    def get_statistics(self):
+        s = {k: self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t, k in [("parts_data", "parts"), ("oe_data", "oe"), ("prices", "prices")]}
+        s['brands'] = self.conn.execute("SELECT COUNT(DISTINCT brand) FROM parts_data").fetchone()[0]
+        s['top'] = self.conn.execute("SELECT brand, COUNT(*) c FROM parts_data GROUP BY brand ORDER BY c DESC LIMIT 5").pl()
+        return s
 
-        # Топ-бренды
-        try:
-            top_brands = self.conn.execute("""
-                SELECT brand, COUNT(*) as count 
-                FROM parts_data 
-                GROUP BY brand 
-                ORDER BY count DESC 
-                LIMIT 10
-            """).pl()
-            stats["top_brands"] = top_brands
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            stats["top_brands"] = pl.DataFrame()
+    def show_statistics(self):
+        st.header("📈 Статистика")
+        s = self.get_statistics()
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f'<div class="metric-card"><div class="metric-value">{s["parts"]:,}</div>Артикулов</div>', unsafe_allow_html=True)
+        c2.markdown(f'<div class="metric-card"><div class="metric-value">{s["brands"]}</div>Брендов</div>', unsafe_allow_html=True)
+        c3.markdown(f'<div class="metric-card"><div class="metric-value">{s["prices"]:,}</div>Цен</div>', unsafe_allow_html=True)
+        st.subheader("🏆 Топ брендов")
+        st.dataframe(s["top"].to_pandas(), use_container_width=True)
 
-        # Категории
-        try:
-            categories = self.conn.execute("""
-                SELECT COALESCE(representative_category, 'Разное') as category, COUNT(*) as count
-                FROM (
-                    SELECT DISTINCT p.artikul_norm, p.brand_norm,
-                           ANY_VALUE(COALESCE(o.category, 'Разное')) as representative_category
-                    FROM parts_data p
-                    LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
-                    LEFT JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
-                    GROUP BY p.artikul_norm, p.brand_norm
-                )
-                GROUP BY category
-                ORDER BY count DESC
-            """).pl()
-            stats["categories"] = categories
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            stats["categories"] = pl.DataFrame()
-
-        # Статистика по брендам (включая цены)
-        try:
-            brands_stats = self.conn.execute("""
-                SELECT 
-                    brand,
-                    COUNT(*) as total_parts,
-                    COUNT(CASE WHEN pr.price IS NOT NULL THEN 1 END) as priced_parts
-                FROM parts_data p
-                LEFT JOIN prices pr ON p.artikul_norm = pr.artikul_norm AND p.brand_norm = pr.brand_norm
-                GROUP BY brand
-                ORDER BY total_parts DESC
-            """).pl()
-            stats["brands_stats"] = brands_stats
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            stats["brands_stats"] = pl.DataFrame()
-
-        return stats
-
-
-# --- Основная функция ---
 
 def main():
-    st.title("🚗 AutoParts Catalog — 10M+ записей")
-    st.markdown("""
-    ### 💼 Профессиональная платформа для управления каталогами автозапчастей
-    - Поддержка больших данных
-    - Инкрементальные обновления
-    - Мультиформатный экспорт
-    - Гибкая настройка
-    """)
+    st.title("🚗 AutoParts Catalog")
+    cpu, mem = psutil.cpu_percent(), psutil.virtual_memory().percent
+    c1, c2 = st.columns(2)
+    c1.markdown(f'<div class="metric-card"><div class="metric-value">{cpu}%</div>CPU</div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="metric-card"><div class="metric-value">{mem}%</div>RAM</div>', unsafe_allow_html=True)
 
-    # Отображение ресурсов
-    col1, col2 = st.columns(2)
-    with col1:
-        cpu = psutil.cpu_percent()
-        st.metric("📊 CPU", f"{cpu}%")
-    with col2:
-        mem = psutil.virtual_memory().percent
-        st.metric("💾 RAM", f"{mem}%")
-
-    catalog = AutoPartsCatalog()
-
-    # Навигация
-    st.sidebar.title("🧭 Навигация")
-    choice = st.sidebar.radio("Раздел", ["Загрузка", "Экспорт", "Статистика", "Управление"])
+    catalog = HighVolumeAutoPartsCatalog()
+    choice = st.sidebar.radio("Меню", ["Загрузка", "Экспорт", "Статистика", "Управление"])
 
     if choice == "Загрузка":
-        st.header("📥 Загрузка и обновление")
-        col1, col2 = st.columns(2)
-        with col1:
-            oe_file = st.file_uploader("Основные данные (OE)", type=['xlsx', 'xls'])
-            cross_file = st.file_uploader("Кроссы (OE→Артикул)", type=['xlsx', 'xls'])
-            barcode_file = st.file_uploader("Штрих-коды", type=['xlsx', 'xls'])
-        with col2:
-            dimensions_file = st.file_uploader("Весогабариты", type=['xlsx', 'xls'])
-            images_file = st.file_uploader("Изображения", type=['xlsx', 'xls'])
-            prices_file = st.file_uploader("Цены", type=['xlsx', 'xls'])
-
-        files_dict = {
-            'oe': oe_file,
-            'cross': cross_file,
-            'barcode': barcode_file,
-            'dimensions': dimensions_file,
-            'images': images_file,
-            'prices': prices_file
-        }
-
-        if st.button("🚀 Обработать", type="primary"):
-            file_paths = {}
-            for key, uploaded in files_dict.items():
-                if uploaded:
-                    save_path = catalog.data_dir / f"upload_{key}_{int(time.time())}.xlsx"
-                    with open(save_path, "wb") as f:
-                        f.write(uploaded.getbuffer())
-                    file_paths[key] = str(save_path)
-            catalog.run_full_merge(file_paths)
+        st.header("📥 Загрузка")
+        ftypes = ['oe', 'cross', 'prices']
+        cols = st.columns(2)
+        files = {}
+        for i, t in enumerate(ftypes):
+            with cols[i % 2]:
+                files[t] = st.file_uploader(t.capitalize(), type=['xlsx'])
+        if st.button("🚀 Загрузить"):
+            paths = {}
+            for k, v in files.items():
+                if v:
+                    p = catalog.data_dir / f"upload_{k}_{time.time()}.xlsx"
+                    with open(p, "wb") as f: f.write(v.getbuffer())
+                    paths[k] = str(p)
+            catalog.merge_all_data_parallel(paths)
 
     elif choice == "Экспорт":
         catalog.show_export_interface()
 
     elif choice == "Статистика":
-        stats = catalog.get_statistics()
-        st.header("📈 Статистика")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.markdown('<div class="metric-card"><div class="metric-value">{:,}</div>Артикулов</div>'.format(stats['total_parts']), unsafe_allow_html=True)
-        col2.markdown('<div class="metric-card"><div class="metric-value">{:,}</div>OE номеров</div>'.format(stats['total_oe']), unsafe_allow_html=True)
-        col3.markdown('<div class="metric-card"><div class="metric-value">{:,}</div>Кроссов</div>'.format(stats['total_cross']), unsafe_allow_html=True)
-        col4.markdown('<div class="metric-card"><div class="metric-value">{:,}</div>Цен</div>'.format(stats['total_prices']), unsafe_allow_html=True)
-
-        st.subheader("📊 Статистика по брендам")
-        if 'brands_stats' in stats and not stats['brands_stats'].is_empty():
-            st.dataframe(stats['brands_stats'].to_pandas(), use_container_width=True)
-        else:
-            st.info("Нет данных по брендам.")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("🏆 Топ брендов")
-            if 'top_brands' in stats and not stats['top_brands'].is_empty():
-                st.dataframe(stats['top_brands'].to_pandas(), use_container_width=True)
-        with col2:
-            st.subheader("🏷️ Категории")
-            if 'categories' in stats and not stats['categories'].is_empty():
-                st.dataframe(stats['categories'].to_pandas(), use_container_width=True)
+        catalog.show_statistics()
 
     elif choice == "Управление":
         catalog.show_data_management()
