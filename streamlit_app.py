@@ -64,15 +64,18 @@ class AutoPartsCatalog:
         if path.exists():
             try:
                 return json.loads(path.read_text(encoding='utf-8'))
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка загрузки cloud_config.json: {e}")
         path.write_text(json.dumps(default, indent=2, ensure_ascii=False), encoding='utf-8')
         return default
 
     def save_cloud_config(self):
         path = self.data_dir / "cloud_config.json"
         self.cloud_config['last_sync'] = int(time.time())
-        path.write_text(json.dumps(self.cloud_config, indent=2, ensure_ascii=False), encoding='utf-8')
+        try:
+            path.write_text(json.dumps(self.cloud_config, indent=2, ensure_ascii=False), encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Не удалось сохранить cloud_config.json: {e}")
 
     def load_price_rules(self) -> Dict[str, Any]:
         path = self.data_dir / "price_rules.json"
@@ -85,14 +88,17 @@ class AutoPartsCatalog:
         if path.exists():
             try:
                 return json.loads(path.read_text(encoding='utf-8'))
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка загрузки price_rules.json: {e}")
         path.write_text(json.dumps(default, indent=2, ensure_ascii=False), encoding='utf-8')
         return default
 
     def save_price_rules(self):
         path = self.data_dir / "price_rules.json"
-        path.write_text(json.dumps(self.price_rules, indent=2, ensure_ascii=False), encoding='utf-8')
+        try:
+            path.write_text(json.dumps(self.price_rules, indent=2, ensure_ascii=False), encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Не удалось сохранить price_rules.json: {e}")
 
     def load_exclusion_rules(self) -> List[str]:
         path = self.data_dir / "exclusion_rules.txt"
@@ -101,14 +107,17 @@ class AutoPartsCatalog:
             try:
                 lines = path.read_text(encoding='utf-8').splitlines()
                 return [line.strip() for line in lines if line.strip()]
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка загрузки exclusion_rules.txt: {e}")
         path.write_text("\n".join(default), encoding='utf-8')
         return default
 
     def save_exclusion_rules(self):
         path = self.data_dir / "exclusion_rules.txt"
-        path.write_text("\n".join(self.exclusion_rules), encoding='utf-8')
+        try:
+            path.write_text("\n".join(self.exclusion_rules), encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Не удалось сохранить exclusion_rules.txt: {e}")
 
     def load_category_mapping(self) -> Dict[str, str]:
         path = self.data_dir / "category_mapping.txt"
@@ -127,16 +136,19 @@ class AutoPartsCatalog:
                         k, v = line.split("|", 1)
                         mapping[k.strip()] = v.strip()
                 return mapping
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка загрузки category_mapping.txt: {e}")
         # Записываем дефолт
         path.write_text("\n".join([f"{k}|{v}" for k, v in default.items()]), encoding='utf-8')
         return default
 
     def save_category_mapping(self):
         path = self.data_dir / "category_mapping.txt"
-        text = "\n".join([f"{k}|{v}" for k, v in self.category_mapping.items()])
-        path.write_text(text, encoding='utf-8')
+        try:
+            text = "\n".join([f"{k}|{v}" for k, v in self.category_mapping.items()])
+            path.write_text(text, encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Не удалось сохранить category_mapping.txt: {e}")
 
     # ----------- База данных -----------
 
@@ -199,7 +211,10 @@ class AutoPartsCatalog:
             "CREATE INDEX IF NOT EXISTS idx_prices_keys ON prices(artikul_norm, brand_norm)"
         ]
         for sql in indexes:
-            self.conn.execute(sql)
+            try:
+                self.conn.execute(sql)
+            except Exception as e:
+                logger.warning(f"Индекс уже существует или ошибка: {e}")
         st.success("🛠️ Индексы созданы.")
 
     # ----------- Методы преобразования данных -----------
@@ -618,230 +633,6 @@ class AutoPartsCatalog:
 
         select_exprs = ",\n        ".join(selected_exprs)
 
-        # ВАЖНО: тут начинаются переменные, которые должны быть внутри метода или функции
-        # Поэтому их нужно вставлять внутрь метода build_export_query, а не оставлять тут как есть
-        # Ниже — пример правильной вставки внутри метода
-
-        # ----------- Внутри метода build_export_query -----------
-
-        # В этом месте нужно вставить код:
-        # price_join = ...
-        # exclusion_conditions = ...
-        # exclusion_where = ...
-        # price_sql = ...
-        # currency_sql = ...
-        # окончательный запрос
-
-        # В текущем виде — это просто части, которые должны быть внутри метода.
-        # Поэтому, чтобы исправить, нужно эти части вставить внутрь метода.
-
-        # Я покажу, как это должно выглядеть внутри метода:
-
-    def build_export_query(self, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> str:
-        """Построение сложного SQL-запроса для экспорта."""
-        standard_description = """Состояние товара: новый (в упаковке).
-Высококачественные автозапчасти и автотовары — надежное решение для вашего автомобиля. 
-Обеспечьте безопасность, долговечность и высокую производительность вашего авто с помощью нашего широкого ассортимента оригинальных и совместимых автозапчастей.
-
-В нашем каталоге вы найдете тормозные системы, фильтры (масляные, воздушные, салонные), свечи зажигания, расходные материалы, автохимию, электрику, автомасла, инструмент, а также другие комплектующие, полностью соответствующие стандартам качества и безопасности. 
-
-Мы гарантируем быструю доставку, выгодные цены и профессиональную консультацию для любого клиента — автолюбителя, специалиста или автосервиса. 
-
-Выбирайте только лучшее — надежность и качество от ведущих производителей."""
-        # Формируем части запроса
-        columns_map = [
-            ("Артикул бренда", 'r.artikul AS "Артикул бренда"'),
-            ("Бренд", 'r.brand AS "Бренд"'),
-            ("Наименование", 'COALESCE(r.representative_name, r.analog_representative_name) AS "Наименование"'),
-            ("Применимость", 'COALESCE(r.representative_applicability, r.analog_representative_applicability) AS "Применимость"'),
-            ("Описание", "CONCAT(COALESCE(r.description, ''), dt.text) AS \"Описание\""),
-            ("Категория товара", 'COALESCE(r.representative_category, r.analog_representative_category) AS "Категория товара"'),
-            ("Кратность", 'r.multiplicity AS "Кратность"'),
-            ("Длинна", 'COALESCE(r.length, r.analog_length) AS "Длинна"'),
-            ("Ширина", 'COALESCE(r.width, r.analog_width) AS "Ширина"'),
-            ("Высота", 'COALESCE(r.height, r.analog_height) AS "Высота"'),
-            ("Вес", 'COALESCE(r.weight, r.analog_weight) AS "Вес"'),
-            ("Длинна/Ширина/Высота", """
-                COALESCE(
-                    CASE
-                        WHEN r.dimensions_str IS NULL OR r.dimensions_str = '' OR UPPER(TRIM(r.dimensions_str)) = 'XX'
-                        THEN NULL
-                        ELSE r.dimensions_str
-                    END,
-                    r.analog_dimensions_str
-                ) AS "Длинна/Ширина/Высота"
-            """),
-            ("OE номер", 'r.oe_list AS "OE номер"'),
-            ("аналоги", 'r.analog_list AS "аналоги"'),
-            ("Ссылка на изображение", 'r.image_url AS "Ссылка на изображение"')
-        ]
-
-        if include_prices:
-            columns_map.extend([("Цена", '"Цена"'), ("Валюта", '"Валюта"')])
-
-        if selected_columns:
-            selected_exprs = [expr for name, expr in columns_map if name in selected_columns]
-        else:
-            selected_exprs = [expr for _, expr in columns_map]
-
-        # Создаем CTE с текстом описания
-        ctes = f"""
-        WITH DescriptionTemplate AS (
-            SELECT CHR(10) || CHR(10) || $${standard_description}$$ AS text
-        ),
-        PartDetails AS (
-            SELECT
-                cr.artikul_norm,
-                cr.brand_norm,
-                STRING_AGG(DISTINCT regexp_replace(regexp_replace(o.oe_number, '''', ''), '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'), ', ') AS oe_list,
-                ANY_VALUE(o.name) AS representative_name,
-                ANY_VALUE(o.applicability) AS representative_applicability,
-                ANY_VALUE(o.category) AS representative_category
-            FROM cross_references cr
-            LEFT JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
-            GROUP BY cr.artikul_norm, cr.brand_norm
-        ),
-        AllAnalogs AS (
-            SELECT
-                cr1.artikul_norm,
-                cr1.brand_norm,
-                STRING_AGG(DISTINCT regexp_replace(regexp_replace(p2.artikul, '''', ''), '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'), ', ') as analog_list
-            FROM cross_references cr1
-            JOIN cross_references cr2 ON cr1.oe_number_norm = cr2.oe_number_norm
-            JOIN parts_data p2 ON cr2.artikul_norm = p2.artikul_norm AND cr2.brand_norm = p2.brand_norm
-            WHERE (cr1.artikul_norm != p2.artikul_norm OR cr1.brand_norm != p2.brand_norm)
-            GROUP BY cr1.artikul_norm, cr1.brand_norm
-        ),
-        InitialOENumbers AS (
-            SELECT DISTINCT p.artikul_norm, p.brand_norm, cr.oe_number_norm
-            FROM parts_data p
-            LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
-            WHERE cr.oe_number_norm IS NOT NULL
-        ),
-        Level1Analogs AS (
-            SELECT DISTINCT
-                i.artikul_norm AS source_artikul_norm,
-                i.brand_norm AS source_brand_norm,
-                cr2.artikul_norm AS related_artikul_norm,
-                cr2.brand_norm AS related_brand_norm
-            FROM InitialOENumbers i
-            JOIN cross_references cr2 ON i.oe_number_norm = cr2.oe_number_norm
-            WHERE NOT (i.artikul_norm = cr2.artikul_norm AND i.brand_norm = cr2.brand_norm)
-        ),
-        Level1OENumbers AS (
-            SELECT DISTINCT
-                l1.source_artikul_norm,
-                l1.source_brand_norm,
-                cr3.oe_number_norm
-            FROM Level1Analogs l1
-            JOIN cross_references cr3 ON l1.related_artikul_norm = cr3.artikul_norm AND l1.related_brand_norm = cr3.brand_norm
-            WHERE NOT EXISTS (
-                SELECT 1 FROM InitialOENumbers i
-                WHERE i.artikul_norm = l1.source_artikul_norm AND i.brand_norm = l1.source_brand_norm AND i.oe_number_norm = cr3.oe_number_norm
-            )
-        ),
-        Level2Analogs AS (
-            SELECT DISTINCT
-                loe.source_artikul_norm,
-                loe.source_brand_norm,
-                cr4.artikul_norm AS related_artikul_norm,
-                cr4.brand_norm AS related_brand_norm
-            FROM Level1OENumbers loe
-            JOIN cross_references cr4 ON loe.oe_number_norm = cr4.oe_number_norm
-            WHERE NOT (loe.source_artikul_norm = cr4.artikul_norm AND loe.source_brand_norm = cr4.brand_norm)
-        ),
-        AllRelatedParts AS (
-            SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
-            FROM Level1Analogs
-            UNION
-            SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
-            FROM Level2Analogs
-        ),
-        AggregatedAnalogData AS (
-            SELECT
-                arp.source_artikul_norm AS artikul_norm,
-                arp.source_brand_norm AS brand_norm,
-                MAX(CASE WHEN p2.length IS NOT NULL THEN p2.length ELSE NULL END) AS length,
-                MAX(CASE WHEN p2.width IS NOT NULL THEN p2.width ELSE NULL END) AS width,
-                MAX(CASE WHEN p2.height IS NOT NULL THEN p2.height ELSE NULL END) AS height,
-                MAX(CASE WHEN p2.weight IS NOT NULL THEN p2.weight ELSE NULL END) AS weight,
-                ANY_VALUE(
-                    CASE WHEN p2.dimensions_str IS NOT NULL AND p2.dimensions_str != '' AND UPPER(TRIM(p2.dimensions_str)) != 'XX'
-                    THEN p2.dimensions_str ELSE NULL END
-                ) AS dimensions_str,
-                ANY_VALUE(
-                    CASE WHEN pd2.representative_name IS NOT NULL AND pd2.representative_name != '' THEN pd2.representative_name ELSE NULL END
-                ) AS representative_name,
-                ANY_VALUE(
-                    CASE WHEN pd2.representative_applicability IS NOT NULL AND pd2.representative_applicability != '' THEN pd2.representative_applicability ELSE NULL END
-                ) AS representative_applicability,
-                ANY_VALUE(
-                    CASE WHEN pd2.representative_category IS NOT NULL AND pd2.representative_category != '' THEN pd2.representative_category ELSE NULL END
-                ) AS representative_category
-            FROM AllRelatedParts arp
-            JOIN parts_data p2 ON arp.related_artikul_norm = p2.artikul_norm AND arp.related_brand_norm = p2.brand_norm
-            LEFT JOIN PartDetails pd2 ON p2.artikul_norm = pd2.artikul_norm AND p2.brand_norm = pd2.brand_norm
-            GROUP BY arp.source_artikul_norm, arp.source_brand_norm
-        ),
-        RankedData AS (
-            SELECT
-                p.artikul,
-                p.brand,
-                p.description,
-                p.multiplicity,
-                p.length,
-                p.width,
-                p.height,
-                p.weight,
-                p.dimensions_str,
-                p.image_url,
-                pd.representative_name,
-                pd.representative_applicability,
-                pd.representative_category,
-                pd.oe_list,
-                aa.analog_list,
-                p_analog.length AS analog_length,
-                p_analog.width AS analog_width,
-                p_analog.height AS analog_height,
-                p_analog.weight AS analog_weight,
-                p_analog.dimensions_str AS analog_dimensions_str,
-                p_analog.representative_name AS analog_representative_name,
-                p_analog.representative_applicability AS analog_representative_applicability,
-                p_analog.representative_category AS analog_representative_category,
-                ROW_NUMBER() OVER (
-                    PARTITION BY p.artikul_norm, p.brand_norm
-                    ORDER BY pd.representative_name DESC NULLS LAST, pd.oe_list DESC NULLS LAST
-                ) AS rn
-            FROM parts_data p
-            LEFT JOIN PartDetails pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
-            LEFT JOIN AllAnalogs aa ON p.artikul_norm = aa.artikul_norm AND p.brand_norm = aa.brand_norm
-            LEFT JOIN AggregatedAnalogData p_analog ON p.artikul_norm = p_analog.artikul_norm AND p.brand_norm = p_analog.brand_norm
-        )
-        """
-
-        select_exprs = ",\n        ".join(selected_exprs)
-
-        # ВЫВОД: всё, что касается переменных, должно быть внутри метода или функции
-        # Поэтому их нужно вставлять сюда. В текущем виде — это просто части, которые должны быть внутри метода.
-        # Поэтому, чтобы исправить, нужно эти части вставить внутрь метода.
-        # Ниже — пример, как это сделать.
-
-        # ----------- Внутри метода build_export_query -----------
-
-        # В этом месте нужно вставить код:
-        # price_join = ...
-        # exclusion_conditions = ...
-        # exclusion_where = ...
-        # price_sql = ...
-        # currency_sql = ...
-        # окончательный запрос
-
-        # Я вставлю их прямо сейчас ниже, внутри метода.
-
-        # --- Вот пример (после исправления):
-        # (Это должно быть внутри метода build_export_query)
-
-        # --- Начинается блок внутри метода ---
         price_join = """
         LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm
         LEFT JOIN BrandMarkups brm ON r.brand = brm.brand
@@ -853,7 +644,7 @@ class AutoPartsCatalog:
         if include_prices:
             markup_value = self.price_rules['global_markup']
             if apply_markup:
-                price_sql = f"CASE WHEN pr.price IS NOT NULL AND TRUE THEN pr.price * (1 + COALESCE(brm.markup, {markup_value})) ELSE pr.price END AS \"Цена\""
+                price_sql = f"CASE WHEN pr.price IS NOT NULL THEN pr.price * (1 + COALESCE(brm.markup, {markup_value})) ELSE pr.price END AS \"Цена\""
             else:
                 price_sql = "pr.price AS \"Цена\""
             currency_sql = "COALESCE(pr.currency, 'RUB') AS \"Валюта\""
@@ -1012,17 +803,19 @@ class AutoPartsCatalog:
                 count = self.conn.execute("DELETE FROM parts_data WHERE brand_norm = ?", [brand_norm]).rowcount
                 self.conn.execute("DELETE FROM cross_references WHERE brand_norm = ?", [brand_norm])
             return count
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка удаления по бренду: {e}")
             return 0
 
     def delete_by_artikul(self, artikul_norm: str) -> int:
-        """Удаление по нормализованному артикула"""
+        """Удаление по нормализованному артикулам"""
         try:
             with self.conn.transaction():
                 count = self.conn.execute("DELETE FROM parts_data WHERE artikul_norm = ?", [artikul_norm]).rowcount
                 self.conn.execute("DELETE FROM cross_references WHERE artikul_norm = ?", [artikul_norm])
             return count
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка удаления по артикулу: {e}")
             return 0
 
     def show_data_management(self):
@@ -1072,7 +865,7 @@ class AutoPartsCatalog:
             count = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE artikul_norm = ?", [artikul_norm]).fetchone()[0]
             st.write(f"Найдено {count} записей для артикула {input_art}")
             confirm = st.checkbox("Я подтверждаю")
-            if st.button("Удалить артикула", disabled=not confirm):
+            if st.button("Удалить артикул", disabled=not confirm):
                 deleted = self.delete_by_artikul(artikul_norm)
                 st.success(f"Удалено {deleted} записей")
                 st.rerun()
@@ -1080,7 +873,8 @@ class AutoPartsCatalog:
     def show_price_rules_ui(self):
         """Интерфейс для настройки цен и наценок"""
         st.subheader("Общая наценка (%)")
-        markup = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1, value=self.price_rules.get('global_markup', 0.2)*100)
+        markup = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1,
+                                 value=self.price_rules.get('global_markup', 0.2) * 100)
         self.price_rules['global_markup'] = markup / 100
         self.save_price_rules()
 
@@ -1090,7 +884,8 @@ class AutoPartsCatalog:
         if options:
             selected = st.selectbox("Выберите бренд", options)
             current_markup = self.price_rules['brand_markups'].get(selected, self.price_rules.get('global_markup', 0.2))
-            markup_value = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1, value=current_markup*100)
+            markup_value = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1,
+                                         value=current_markup * 100)
             if st.button("Сохранить для бренда"):
                 self.price_rules['brand_markups'][selected] = markup_value / 100
                 self.save_price_rules()
@@ -1108,6 +903,7 @@ class AutoPartsCatalog:
         new_text = st.text_area("Исключения (по одному слову)", value=current, height=200)
         if st.button("Сохранить исключения"):
             lines = [line.strip() for line in new_text.splitlines() if line.strip()]
+            # Удаление дубликатов с сохранением порядка
             self.exclusion_rules = list(dict.fromkeys(lines))
             self.save_exclusion_rules()
 
@@ -1123,15 +919,20 @@ class AutoPartsCatalog:
         new_key = st.text_input("Новое правило: ключевое слово")
         new_value = st.text_input("Категория")
         if st.button("Добавить правило") and new_key and new_value:
-            self.category_mapping[new_key.strip()] = new_value.strip()
-            self.save_category_mapping()
+            key = new_key.strip()
+            value = new_value.strip()
+            if key and value:
+                self.category_mapping[key] = value
+                self.save_category_mapping()
 
         # Удаление
         if self.category_mapping:
-            to_del = st.selectbox("Удалить правило", list(self.category_mapping.keys()), format_func=lambda x: f"{x} → {self.category_mapping[x]}")
+            to_del = st.selectbox("Удалить правило", list(self.category_mapping.keys()),
+                                  format_func=lambda x: f"{x} → {self.category_mapping[x]}")
             if st.button("Удалить правило"):
-                del self.category_mapping[to_del]
-                self.save_category_mapping()
+                if to_del in self.category_mapping:
+                    del self.category_mapping[to_del]
+                    self.save_category_mapping()
 
     def show_cloud_sync_ui(self):
         """Интерфейс для настройки облачных сервисов"""
@@ -1142,7 +943,8 @@ class AutoPartsCatalog:
         self.cloud_config['provider'] = st.selectbox("Провайдер", providers, index=current_idx)
         self.cloud_config['bucket'] = st.text_input("Bucket / Container", value=self.cloud_config['bucket'])
         self.cloud_config['region'] = st.text_input("Регион", value=self.cloud_config['region'])
-        self.cloud_config['sync_interval'] = st.number_input("Интервал синхронизации (сек)", min_value=300, max_value=86400, value=int(self.cloud_config['sync_interval']))
+        self.cloud_config['sync_interval'] = st.number_input("Интервал синхронизации (сек)", min_value=300, max_value=86400,
+                                                             value=int(self.cloud_config['sync_interval']))
         if st.button("Сохранить настройки"):
             self.save_cloud_config()
         if st.button("Выполнить синхронизацию сейчас"):
@@ -1178,53 +980,74 @@ class AutoPartsCatalog:
                     if df is not None and not df.is_empty():
                         results[ftype] = df
                         logger.info(f"Файл {ftype} обработан.")
-                except:
-                    logger.exception(f"Ошибка при обработке файла {ftype}")
+                except Exception as e:
+                    logger.exception(f"Ошибка при обработке файла {ftype}: {e}")
         return results
 
-    # Этот метод дублируется, его стоит оставить только одно определение
-    def read_and_prepare_file(self, filepath: str, file_type: str) -> Optional[pl.DataFrame]:
-        """Чтение файла и подготовка данных"""
-        try:
-            if not os.path.exists(filepath):
-                logger.warning(f"Файл не найден: {filepath}")
-                return None
-            # Чтение файла
-            df = pl.read_excel(filepath, engine='calamine')
-            if df.is_empty():
-                logger.warning(f"Файл пуст: {filepath}")
-                return None
-            # Определяем схему и переименовываем колонки
-            schemas = {
-                'oe': ['oe_number', 'artikul', 'brand', 'name', 'applicability'],
-                'barcode': ['brand', 'artikul', 'barcode', 'multiplicity'],
-                'dimensions': ['artikul', 'brand', 'length', 'width', 'height', 'weight', 'dimensions_str'],
-                'images': ['artikul', 'brand', 'image_url'],
-                'cross': ['oe_number', 'artikul', 'brand'],
-                'prices': ['artikul', 'brand', 'price', 'currency']
-            }
-            expected_cols = schemas.get(file_type, [])
-            col_map = self.detect_columns(df.columns, expected_cols)
-            if not col_map:
-                return None
-            df = df.rename(col_map)
-            # Очистка и нормализация
-            for col in ['artikul', 'brand', 'oe_number']:
-                if col in df.columns:
-                    df = df.with_columns(self.clean_values(pl.col(col)).alias(col))
-            # Удаление дубликатов
-            key_cols = [c for c in ['oe_number', 'artikul', 'brand'] if c in df.columns]
-            if key_cols:
-                df = df.unique(subset=key_cols, keep='first')
-            # Создаем нормальные ключи
-            for col in ['artikul', 'brand', 'oe_number']:
-                if col in df.columns:
-                    df = df.with_columns(self.normalize_key(pl.col(col)).alias(f"{col}_norm"))
-            return df
-        except:
-            return None
+    def run_full_merge(self, file_paths: Dict[str, str]):
+        """Полный процесс слияния файлов: параллельное чтение → объединение → загрузка."""
+        dataframes = self.merge_files_parallel(file_paths)
+        if dataframes:
+            self.process_and_load_data(dataframes)
+        else:
+            st.warning("Ни один файл не был загружен или обработан.")
 
-# --- Внутри класса заканчивается. В основном файле — функции и вызов main() ---
+    # ----------- Статистика -----------
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Сбор статистики по базе данных."""
+        stats = {
+            "total_parts": self.conn.execute("SELECT COUNT(*) FROM parts_data").fetchone()[0],
+            "total_oe": self.conn.execute("SELECT COUNT(*) FROM oe_data").fetchone()[0],
+            "total_cross": self.conn.execute("SELECT COUNT(*) FROM cross_references").fetchone()[0],
+            "total_prices": self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
+        }
+        # Топ-бренды
+        try:
+            top_brands = self.conn.execute("""
+                SELECT brand, COUNT(*) as count 
+                FROM parts_data 
+                GROUP BY brand 
+                ORDER BY count DESC 
+                LIMIT 10
+            """).pl()
+            stats["top_brands"] = top_brands
+        except Exception as e:
+            logger.error(f"Ошибка при получении топ-брендов: {e}")
+            stats["top_brands"] = pl.DataFrame()
+
+        # Категории
+        try:
+            categories = self.conn.execute("""
+                SELECT representative_category as category, COUNT(*) as count
+                FROM (
+                    SELECT DISTINCT p.artikul_norm, p.brand_norm, pd.representative_category
+                    FROM parts_data p
+                    LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
+                    LEFT JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
+                    LEFT JOIN (
+                        SELECT artikul_norm, brand_norm, ANY_VALUE(category) as representative_category
+                        FROM (
+                            SELECT artikul_norm, brand_norm, category
+                            FROM cross_references
+                            JOIN oe_data ON cross_references.oe_number_norm = oe_data.oe_number_norm
+                        )
+                        GROUP BY artikul_norm, brand_norm
+                    ) pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
+                )
+                WHERE category IS NOT NULL
+                GROUP BY category
+                ORDER BY count DESC
+            """).pl()
+            stats["categories"] = categories
+        except Exception as e:
+            logger.error(f"Ошибка при получении категорий: {e}")
+            stats["categories"] = pl.DataFrame()
+
+        return stats
+
+
+# --- Основная функция ---
 
 def main():
     st.title("🚗 AutoParts Catalog — Масштабируемая система для 10+ млн записей")
@@ -1291,14 +1114,15 @@ def main():
         st.metric("Кроссы", stats.get('total_cross', 0))
         st.metric("Цены", stats.get('total_prices', 0))
         st.subheader("Топ-бренды")
-        if 'top_brands' in stats:
+        if 'top_brands' in stats and not stats['top_brands'].is_empty():
             st.dataframe(stats['top_brands'].to_pandas())
         st.subheader("Категории")
-        if 'categories' in stats:
+        if 'categories' in stats and not stats['categories'].is_empty():
             st.dataframe(stats['categories'].to_pandas())
 
     elif choice == "Управление":
         catalog.show_data_management()
+
 
 if __name__ == "__main__":
     main()
