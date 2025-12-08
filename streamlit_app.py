@@ -9,6 +9,7 @@ import io
 import zipfile
 import json
 import logging
+import psutil
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,11 +44,36 @@ class AutoPartsCatalog:
         st.set_page_config(
             page_title="AutoParts Catalog 10M+",
             layout="wide",
-            page_icon="🚗"
+            page_icon="🚗",
+            initial_sidebar_state="expanded"
         )
+
+        # Тема
+        self.apply_custom_theme()
 
         # Создаем таблицы и индексы
         self.create_indexes()
+
+    def apply_custom_theme(self):
+        """Настройка кастомного стиля интерфейса"""
+        st.markdown("""
+        <style>
+        .main { background-color: #f8f9fa; }
+        .stButton>button { 
+            background-color: #007BFF; 
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            padding: 10px 20px; 
+            font-size: 16px; 
+        }
+        .stButton>button:hover { background-color: #0056b3; }
+        .stProgress .st-bo { background-color: #007BFF; }
+        .css-1v0mbdj img { border-radius: 50%; }
+        h1, h2, h3 { color: #003366; }
+        .stAlert { border-radius: 8px; }
+        </style>
+        """, unsafe_allow_html=True)
 
     # ----------- Конфигурации и настройки -----------
 
@@ -202,20 +228,20 @@ class AutoPartsCatalog:
 
     def create_indexes(self):
         """Создание индексов для ускорения поиска"""
-        st.info("🛠️ Создание индексов...")
-        indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_oe_data_oe ON oe_data(oe_number_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_parts_data_keys ON parts_data(artikul_norm, brand_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_cross_oe ON cross_references(oe_number_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_cross_artikul ON cross_references(artikul_norm, brand_norm)",
-            "CREATE INDEX IF NOT EXISTS idx_prices_keys ON prices(artikul_norm, brand_norm)"
-        ]
-        for sql in indexes:
-            try:
-                self.conn.execute(sql)
-            except Exception as e:
-                logger.warning(f"Индекс уже существует или ошибка: {e}")
-        st.success("🛠️ Индексы созданы.")
+        with st.spinner("🛠️ Создание индексов..."):
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_oe_data_oe ON oe_data(oe_number_norm)",
+                "CREATE INDEX IF NOT EXISTS idx_parts_data_keys ON parts_data(artikul_norm, brand_norm)",
+                "CREATE INDEX IF NOT EXISTS idx_cross_oe ON cross_references(oe_number_norm)",
+                "CREATE INDEX IF NOT EXISTS idx_cross_artikul ON cross_references(artikul_norm, brand_norm)",
+                "CREATE INDEX IF NOT EXISTS idx_prices_keys ON prices(artikul_norm, brand_norm)"
+            ]
+            for sql in indexes:
+                try:
+                    self.conn.execute(sql)
+                except Exception as e:
+                    logger.warning(f"Индекс уже существует или ошибка: {e}")
+        st.success("✅ Индексы созданы.")
 
     # ----------- Методы преобразования данных -----------
 
@@ -307,8 +333,10 @@ class AutoPartsCatalog:
             if not os.path.exists(filepath):
                 logger.warning(f"Файл не найден: {filepath}")
                 return None
-            # Чтение файла
-            df = pl.read_excel(filepath, engine='calamine')
+            # Используем fastexcel для более быстрого чтения
+            import fastexcel
+            reader = fastexcel.read_excel(filepath)
+            df = pl.from_pandas(reader.load_sheet(0).to_pandas())
             if df.is_empty():
                 logger.warning(f"Файл пуст: {filepath}")
                 return None
@@ -440,9 +468,6 @@ class AutoPartsCatalog:
             if not df_prices.is_empty():
                 self.upsert_prices(df_prices)
                 st.success(f"Обновлено цен: {len(df_prices)} записей.")
-
-        # Обработка артикулами и товарами
-        # ... (можно расширять по необходимости)
 
         progress.progress(1.0)
         time.sleep(0.5)
@@ -721,15 +746,15 @@ class AutoPartsCatalog:
                     df[col] = df[col].astype(str).replace({r'^nan$': ''}, regex=True)
 
             if len(df) <= EXCEL_ROW_LIMIT:
-                with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
                     df.to_excel(writer, index=False)
             else:
                 sheets = (len(df) // EXCEL_ROW_LIMIT) + 1
-                with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
                     for i in range(sheets):
                         start = i * EXCEL_ROW_LIMIT
                         end = min((i + 1) * EXCEL_ROW_LIMIT, len(df))
-                        df.iloc[start:end].to_excel(writer, index=False)
+                        df.iloc[start:end].to_excel(writer, index=False, sheet_name=f"Лист_{i+1}")
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             st.success(f"✅ Экспорт завершен: {output_path} ({size_mb:.2f} МБ)")
             return True
@@ -765,22 +790,30 @@ class AutoPartsCatalog:
         if total == 0:
             st.warning("Данных для выгрузки нет.")
             return
+
         available_cols = [
             "Артикул бренда", "Бренд", "Наименование", "Применимость", "Описание",
             "Категория товара", "Кратность", "Длинна", "Ширина", "Высота", "Вес",
             "Длинна/Ширина/Высота", "OE номер", "аналоги", "Ссылка на изображение"
         ]
-        # Добавляем цены, если есть
         if self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0] > 0:
             available_cols.extend(["Цена", "Валюта"])
 
-        selected_cols = st.multiselect("Выберите столбцы для экспорта", options=available_cols, default=available_cols)
+        selected_cols = st.multiselect(
+            "Выберите столбцы для экспорта", 
+            options=available_cols, 
+            default=available_cols,
+            help="Выберите нужные столбцы. Цены можно добавить, если они загружены."
+        )
 
-        format_choice = st.radio("Формат экспорта", ["CSV", "Excel (.xlsx)", "Parquet"])
-        include_prices = st.checkbox("Включить цены", value=True)
-        apply_markup = st.checkbox("Применить наценку", value=True, disabled=not include_prices)
+        col1, col2 = st.columns(2)
+        with col1:
+            format_choice = st.radio("Формат экспорта", ["CSV", "Excel (.xlsx)", "Parquet"])
+        with col2:
+            include_prices = st.checkbox("Включить цены", value=True)
+            apply_markup = st.checkbox("Применить наценку", value=True, disabled=not include_prices)
 
-        if st.button("🚀 Экспортировать"):
+        if st.button("🚀 Экспортировать", type="primary"):
             output_path = self.data_dir / f"auto_parts_export.{format_choice.lower().replace(' ', '_')}"
             with st.spinner("Готовлю файл..."):
                 if format_choice == "CSV":
@@ -792,7 +825,12 @@ class AutoPartsCatalog:
 
             if success:
                 with open(output_path, "rb") as f:
-                    st.download_button("⬇️ Скачать файл", f, output_path.name)
+                    st.download_button(
+                        "⬇️ Скачать файл",
+                        f,
+                        output_path.name,
+                        mime="application/octet-stream"
+                    )
 
     # ----------- Управление данными -----------
 
@@ -823,60 +861,79 @@ class AutoPartsCatalog:
         st.header("🗑️ Управление данными")
         st.warning("⚠️ Операции необратимы!")
 
-        option = st.radio("Действие", ["Удалить по бренду", "Удалить по артикулам", "Настройки цен", "Исключения", "Категории", "Облако"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "Удаление", "Настройки цен", "Исключения", "Категории", "Облако"
+        ])
 
-        if option == "Удалить по бренду":
+        with tab1:
             self._delete_by_brand_ui()
-        elif option == "Удалить по артикулам":
             self._delete_by_artikul_ui()
-        elif option == "Настройки цен":
+
+        with tab2:
             self.show_price_rules_ui()
-        elif option == "Исключения":
+
+        with tab3:
             self.show_exclusion_rules_ui()
-        elif option == "Категории":
+
+        with tab4:
             self.show_category_mapping_ui()
-        elif option == "Облако":
+
+        with tab5:
             self.show_cloud_sync_ui()
 
     def _delete_by_brand_ui(self):
         """UI для удаления по бренду"""
+        st.subheader("Удалить по бренду")
         brands = self.conn.execute("SELECT DISTINCT brand FROM parts_data WHERE brand IS NOT NULL ORDER BY brand").fetchall()
         options = [b[0] for b in brands]
         if not options:
             st.info("Нет брендов в базе.")
             return
         selected = st.selectbox("Выберите бренд для удаления", options)
-        # Получаем нормализованный бренд
         result = self.conn.execute("SELECT brand_norm FROM parts_data WHERE brand = ? LIMIT 1", [selected]).fetchone()
         brand_norm = result[0] if result else self.normalize_key(pl.Series([selected]))[0]
         count = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE brand_norm = ?", [brand_norm]).fetchone()[0]
-        st.write(f"Удалить {count} записей бренда {selected}?")
-        confirm = st.checkbox("Я подтверждаю")
-        if st.button("Удалить бренд", disabled=not confirm):
+        st.write(f"Удалить **{count}** записей бренда `{selected}`?")
+        confirm = st.checkbox("✅ Я подтверждаю удаление")
+        if st.button("Удалить бренд", type="primary", disabled=not confirm):
             deleted = self.delete_by_brand(brand_norm)
-            st.success(f"Удалено {deleted} записей")
+            st.success(f"✅ Удалено {deleted} записей")
             st.rerun()
 
     def _delete_by_artikul_ui(self):
         """UI для удаления по артикулам"""
+        st.subheader("Удалить по артикулу")
         input_art = st.text_input("Введите артикул для удаления")
         if input_art:
             artikul_norm = self.normalize_key(pl.Series([input_art]))[0]
             count = self.conn.execute("SELECT COUNT(*) FROM parts_data WHERE artikul_norm = ?", [artikul_norm]).fetchone()[0]
-            st.write(f"Найдено {count} записей для артикула {input_art}")
-            confirm = st.checkbox("Я подтверждаю")
-            if st.button("Удалить артикул", disabled=not confirm):
+            st.write(f"Найдено **{count}** записей для артикула `{input_art}`")
+            confirm = st.checkbox("✅ Я подтверждаю удаление")
+            if st.button("Удалить артикул", type="primary", disabled=not confirm):
                 deleted = self.delete_by_artikul(artikul_norm)
-                st.success(f"Удалено {deleted} записей")
+                st.success(f"✅ Удалено {deleted} записей")
                 st.rerun()
 
     def show_price_rules_ui(self):
         """Интерфейс для настройки цен и наценок"""
-        st.subheader("Общая наценка (%)")
-        markup = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1,
-                                 value=self.price_rules.get('global_markup', 0.2) * 100)
-        self.price_rules['global_markup'] = markup / 100
-        self.save_price_rules()
+        st.subheader("Наценки")
+        col1, col2 = st.columns(2)
+        with col1:
+            markup = st.number_input(
+                "Общая наценка (%)", 
+                min_value=0.0, max_value=100.0, step=0.1,
+                value=self.price_rules.get('global_markup', 0.2) * 100
+            )
+            self.price_rules['global_markup'] = markup / 100
+        with col2:
+            min_price = st.number_input("Мин. цена", value=self.price_rules.get('min_price', 0.0))
+            max_price = st.number_input("Макс. цена", value=self.price_rules.get('max_price', 99999.0))
+            self.price_rules['min_price'] = min_price
+            self.price_rules['max_price'] = max_price
+
+        if st.button("Сохранить глобальные правила"):
+            self.save_price_rules()
+            st.success("Готово!")
 
         st.subheader("Наценки по брендам")
         brands = self.conn.execute("SELECT DISTINCT brand FROM parts_data WHERE brand IS NOT NULL").fetchall()
@@ -884,69 +941,78 @@ class AutoPartsCatalog:
         if options:
             selected = st.selectbox("Выберите бренд", options)
             current_markup = self.price_rules['brand_markups'].get(selected, self.price_rules.get('global_markup', 0.2))
-            markup_value = st.number_input("Наценка (%)", min_value=0.0, max_value=100.0, step=0.1,
-                                         value=current_markup * 100)
+            markup_value = st.number_input(
+                "Наценка (%)", 
+                min_value=0.0, max_value=100.0, step=0.1,
+                value=current_markup * 100
+            )
             if st.button("Сохранить для бренда"):
                 self.price_rules['brand_markups'][selected] = markup_value / 100
                 self.save_price_rules()
-
-        st.subheader("Ограничения цен")
-        min_price = st.number_input("Мин. цена", value=self.price_rules.get('min_price', 0.0))
-        max_price = st.number_input("Макс. цена", value=self.price_rules.get('max_price', 99999.0))
-        self.price_rules['min_price'] = min_price
-        self.price_rules['max_price'] = max_price
-        self.save_price_rules()
+                st.success(f"Наценка для `{selected}` сохранена!")
 
     def show_exclusion_rules_ui(self):
         """Интерфейс для правил исключений"""
+        st.subheader("Правила исключения из экспорта")
         current = "\n".join(self.exclusion_rules)
-        new_text = st.text_area("Исключения (по одному слову)", value=current, height=200)
+        new_text = st.text_area("Ключевые слова (по одному на строку)", value=current, height=150)
         if st.button("Сохранить исключения"):
             lines = [line.strip() for line in new_text.splitlines() if line.strip()]
-            # Удаление дубликатов с сохранением порядка
             self.exclusion_rules = list(dict.fromkeys(lines))
             self.save_exclusion_rules()
+            st.success("✅ Правила обновлены")
 
     def show_category_mapping_ui(self):
         """Интерфейс для назначения категорий"""
-        st.subheader("Текущие правила")
+        st.subheader("Категории по ключевым словам")
         df = pl.DataFrame({
-            "Название": list(self.category_mapping.keys()),
+            "Ключевое слово": list(self.category_mapping.keys()),
             "Категория": list(self.category_mapping.values())
         })
-        st.dataframe(df.to_pandas())
+        st.dataframe(df.to_pandas(), use_container_width=True)
 
-        new_key = st.text_input("Новое правило: ключевое слово")
-        new_value = st.text_input("Категория")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_key = st.text_input("Новое слово")
+        with col2:
+            new_value = st.text_input("Категория")
         if st.button("Добавить правило") and new_key and new_value:
             key = new_key.strip()
             value = new_value.strip()
             if key and value:
                 self.category_mapping[key] = value
                 self.save_category_mapping()
+                st.success(f"✅ Добавлено: `{key}` → `{value}`")
 
-        # Удаление
         if self.category_mapping:
             to_del = st.selectbox("Удалить правило", list(self.category_mapping.keys()),
-                                  format_func=lambda x: f"{x} → {self.category_mapping[x]}")
+                              format_func=lambda x: f"{x} → {self.category_mapping[x]}")
             if st.button("Удалить правило"):
-                if to_del in self.category_mapping:
-                    del self.category_mapping[to_del]
-                    self.save_category_mapping()
+                del self.category_mapping[to_del]
+                self.save_category_mapping()
+                st.success("✅ Правило удалено")
+                st.rerun()
 
     def show_cloud_sync_ui(self):
         """Интерфейс для настройки облачных сервисов"""
-        st.subheader("Настройки синхронизации с облаком")
+        st.subheader("Синхронизация с облаком")
         self.cloud_config['enabled'] = st.checkbox("Включить синхронизацию", value=self.cloud_config['enabled'])
-        providers = ["s3", "gcs", "azure"]
-        current_idx = providers.index(self.cloud_config['provider']) if self.cloud_config['provider'] in providers else 0
-        self.cloud_config['provider'] = st.selectbox("Провайдер", providers, index=current_idx)
-        self.cloud_config['bucket'] = st.text_input("Bucket / Container", value=self.cloud_config['bucket'])
-        self.cloud_config['region'] = st.text_input("Регион", value=self.cloud_config['region'])
-        self.cloud_config['sync_interval'] = st.number_input("Интервал синхронизации (сек)", min_value=300, max_value=86400,
-                                                             value=int(self.cloud_config['sync_interval']))
+        col1, col2 = st.columns(2)
+        with col1:
+            providers = ["s3", "gcs", "azure"]
+            current_idx = providers.index(self.cloud_config['provider']) if self.cloud_config['provider'] in providers else 0
+            self.cloud_config['provider'] = st.selectbox("Провайдер", providers, index=current_idx)
+            self.cloud_config['bucket'] = st.text_input("Bucket / Container", value=self.cloud_config['bucket'])
+        with col2:
+            self.cloud_config['region'] = st.text_input("Регион", value=self.cloud_config['region'])
+            self.cloud_config['sync_interval'] = st.number_input(
+                "Интервал (сек)", min_value=300, max_value=86400, value=int(self.cloud_config['sync_interval'])
+            )
+
         if st.button("Сохранить настройки"):
             self.save_cloud_config()
+            st.success("✅ Настройки сохранены")
+
         if st.button("Выполнить синхронизацию сейчас"):
             self.perform_cloud_sync()
 
@@ -956,13 +1022,13 @@ class AutoPartsCatalog:
             st.warning("Синхронизация отключена.")
             return
         if not self.cloud_config['bucket']:
-            st.error("Не указан bucket.")
+            st.error("Укажите bucket.")
             return
-        with st.spinner("Выполняется синхронизация..."):
+        with st.spinner("Синхронизация..."):
             time.sleep(1.5)
-            st.success(f"База данных отправлена в {self.cloud_config['provider']}://{self.cloud_config['bucket']}")
-            self.cloud_config['last_sync'] = int(time.time())
-            self.save_cloud_config()
+        st.success(f"📤 База отправлена в `{self.cloud_config['provider']}`")
+        self.cloud_config['last_sync'] = int(time.time())
+        self.save_cloud_config()
 
     # ----------- Обработка и загрузка файлов -----------
 
@@ -979,30 +1045,34 @@ class AutoPartsCatalog:
                     df = future.result()
                     if df is not None and not df.is_empty():
                         results[ftype] = df
-                        logger.info(f"Файл {ftype} обработан.")
+                        logger.info(f"✅ {ftype} обработан")
                 except Exception as e:
-                    logger.exception(f"Ошибка при обработке файла {ftype}: {e}")
+                    logger.exception(f"❌ Ошибка при обработке {ftype}: {e}")
         return results
 
     def run_full_merge(self, file_paths: Dict[str, str]):
-        """Полный процесс слияния файлов: параллельное чтение → объединение → загрузка."""
-        dataframes = self.merge_files_parallel(file_paths)
+        """Полный процесс: чтение → обработка → загрузка."""
+        if not file_paths:
+            st.warning("Нет файлов для загрузки.")
+            return
+        with st.spinner("Чтение файлов..."):
+            dataframes = self.merge_files_parallel(file_paths)
         if dataframes:
-            self.process_and_load_data(dataframes)
+            with st.spinner("Загрузка в базу..."):
+                self.process_and_load_data(dataframes)
         else:
-            st.warning("Ни один файл не был загружен или обработан.")
+            st.warning("❌ Ни один файл не был обработан.")
 
     # ----------- Статистика -----------
 
     def get_statistics(self) -> Dict[str, Any]:
-        """Сбор статистики по базе данных."""
+        """Сбор статистики."""
         stats = {
             "total_parts": self.conn.execute("SELECT COUNT(*) FROM parts_data").fetchone()[0],
             "total_oe": self.conn.execute("SELECT COUNT(*) FROM oe_data").fetchone()[0],
             "total_cross": self.conn.execute("SELECT COUNT(*) FROM cross_references").fetchone()[0],
             "total_prices": self.conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
         }
-        # Топ-бренды
         try:
             top_brands = self.conn.execute("""
                 SELECT brand, COUNT(*) as count 
@@ -1016,7 +1086,6 @@ class AutoPartsCatalog:
             logger.error(f"Ошибка при получении топ-брендов: {e}")
             stats["top_brands"] = pl.DataFrame()
 
-        # Категории
         try:
             categories = self.conn.execute("""
                 SELECT representative_category as category, COUNT(*) as count
@@ -1024,7 +1093,6 @@ class AutoPartsCatalog:
                     SELECT DISTINCT p.artikul_norm, p.brand_norm, pd.representative_category
                     FROM parts_data p
                     LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
-                    LEFT JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
                     LEFT JOIN (
                         SELECT artikul_norm, brand_norm, ANY_VALUE(category) as representative_category
                         FROM (
@@ -1050,7 +1118,7 @@ class AutoPartsCatalog:
 # --- Основная функция ---
 
 def main():
-    st.title("🚗 AutoParts Catalog — Масштабируемая система для 10+ млн записей")
+    st.title("🚗 AutoParts Catalog — 10M+ записей")
     st.markdown("""
     ### 💼 Профессиональная платформа для управления каталогами автозапчастей
     - Поддержка больших данных
@@ -1059,11 +1127,20 @@ def main():
     - Гибкая настройка
     """)
 
+    # Отображение использования ресурсов
+    col1, col2 = st.columns(2)
+    with col1:
+        cpu = psutil.cpu_percent()
+        st.metric("📊 Использование CPU", f"{cpu}%")
+    with col2:
+        mem = psutil.virtual_memory().percent
+        st.metric("💾 Использование RAM", f"{mem}%")
+
     catalog = AutoPartsCatalog()
 
     # Навигация
     st.sidebar.title("🧭 Навигация")
-    choice = st.sidebar.radio("Выберите раздел", ["Загрузка данных", "Экспорт", "Статистика", "Управление"])
+    choice = st.sidebar.radio("Раздел", ["Загрузка данных", "Экспорт", "Статистика", "Управление"])
 
     if choice == "Загрузка данных":
         st.header("📥 Загрузка и обновление")
@@ -1086,8 +1163,7 @@ def main():
             'prices': prices_file
         }
 
-        if st.button("🚀 Обработать файлы"):
-            # Сохраняем временно
+        if st.button("🚀 Обработать файлы", type="primary"):
             file_paths = {}
             for key, uploaded in files_dict.items():
                 if uploaded:
@@ -1095,13 +1171,7 @@ def main():
                     with open(save_path, "wb") as f:
                         f.write(uploaded.getbuffer())
                     file_paths[key] = str(save_path)
-            if file_paths:
-                # Обработка
-                with st.spinner("Обработка файлов..."):
-                    catalog.run_full_merge(file_paths)
-                st.success("Обработка завершена.")
-            else:
-                st.warning("Загрузите хотя бы один файл.")
+            catalog.run_full_merge(file_paths)
 
     elif choice == "Экспорт":
         catalog.show_export_interface()
@@ -1109,16 +1179,21 @@ def main():
     elif choice == "Статистика":
         stats = catalog.get_statistics()
         st.header("📈 Статистика")
-        st.metric("Всего артикулов", stats.get('total_parts', 0))
-        st.metric("OE номера", stats.get('total_oe', 0))
-        st.metric("Кроссы", stats.get('total_cross', 0))
-        st.metric("Цены", stats.get('total_prices', 0))
-        st.subheader("Топ-бренды")
-        if 'top_brands' in stats and not stats['top_brands'].is_empty():
-            st.dataframe(stats['top_brands'].to_pandas())
-        st.subheader("Категории")
-        if 'categories' in stats and not stats['categories'].is_empty():
-            st.dataframe(stats['categories'].to_pandas())
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("📦 Артикулов", f"{stats['total_parts']:,}")
+        col2.metric("🔢 OE номера", f"{stats['total_oe']:,}")
+        col3.metric("🔗 Кроссы", f"{stats['total_cross']:,}")
+        col4.metric("💰 Цены", f"{stats['total_prices']:,}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🏆 Топ брендов")
+            if 'top_brands' in stats and not stats['top_brands'].is_empty():
+                st.dataframe(stats['top_brands'].to_pandas(), use_container_width=True)
+        with col2:
+            st.subheader("🏷️ Категории")
+            if 'categories' in stats and not stats['categories'].is_empty():
+                st.dataframe(stats['categories'].to_pandas(), use_container_width=True)
 
     elif choice == "Управление":
         catalog.show_data_management()
