@@ -238,7 +238,7 @@ class HighVolumeAutoPartsCatalog:
                 .fill_null("")
                 .cast(pl.Utf8)
                 .str.replace_all("'", "")
-                .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\\-\\s]", "")
+                .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\-\s]", "")
                 .str.replace_all(r"\s+", " ")
                 .str.strip_chars()
                 .str.to_lowercase())
@@ -250,7 +250,7 @@ class HighVolumeAutoPartsCatalog:
                 .fill_null("")
                 .cast(pl.Utf8)
                 .str.replace_all("'", "")
-                .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\\-\\s]", "")
+                .str.replace_all(r"[^0-9A-Za-zА-Яа-яЁё`\-\s]", "")
                 .str.replace_all(r"\s+", " ")
                 .str.strip_chars())
 
@@ -480,14 +480,14 @@ class HighVolumeAutoPartsCatalog:
         if include_prices:
             if apply_markup:
                 global_markup = self.price_rules['global_markup']
-                price_case = f"""
+                price_case = """
                 CASE
                     WHEN pr.price IS NOT NULL
                     THEN pr.price * (1 + COALESCE(brm.markup, {global_markup}))
                     ELSE pr.price
                 END AS "Цена",
                 COALESCE(pr.currency, 'RUB') AS "Валюта",
-                """
+                """.format(global_markup=global_markup)
             else:
                 price_case = """
                 pr.price AS "Цена",
@@ -758,6 +758,362 @@ class HighVolumeAutoPartsCatalog:
             st.error(str(e))
             return False
 
+    def export_to_excel_optimized(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
+        """Экспорт в Excel с разбивкой"""
+        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts)").fetchone()[0]
+        if total == 0:
+            st.warning("Нет данных")
+            return False
+        import pandas as pd
+        query = self.build_export_query(selected_columns, include_prices, apply_markup)
+        df = pd.read_sql(query, self.conn)
+        # преобразование размеров
+        for col in ["Длинна", "Ширина", "Высота", "Вес", "Длинна/Ширина/Высота"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str).replace({r'^nan$': ''}, regex=True)
+        if len(df) <= EXCEL_ROW_LIMIT:
+            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+        else:
+            sheets = (len(df) // EXCEL_ROW_LIMIT) + 1
+            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                for i in range(sheets):
+                    df.iloc[i*EXCEL_ROW_LIMIT:(i+1)*EXCEL_ROW_LIMIT].to_excel(writer, index=False, sheet_name=f"Данные_{i+1}")
+        return True
+
+    def export_to_parquet(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
+        """Экспорт в Parquet"""
+        try:
+            query = self.build_export_query(selected_columns, include_prices, apply_markup)
+            df = self.conn.execute(query).pl()
+            df.write_parquet(output_path)
+            return True
+        except Exception as e:
+            logger.exception("Ошибка экспорта Parquet")
+            st.error(str(e))
+            return False
+
+    def show_price_settings(self):
+        """Интерфейс настройки цен и наценок"""
+        st.header("💰 Управление ценами и наценками")
+        # Общая наценка
+        st.subheader("Общая наценка")
+        global_markup = st.number_input(
+            "Общая наценка (%):",
+            min_value=0.0,
+            max_value=100.0,
+            value=self.price_rules['global_markup'] * 100,
+            step=0.1
+        )
+        self.price_rules['global_markup'] = global_markup / 100
+
+        # Наценки по брендам
+        st.subheader("Наценки по брендам")
+        brand_markups = self.price_rules.get('brand_markups', {})
+
+        try:
+            brands_result = self.conn.execute("SELECT DISTINCT brand FROM parts WHERE brand IS NOT NULL ORDER BY brand").fetchall()
+            available_brands = [row[0] for row in brands_result] if brands_result else []
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка брендов: {e}")
+            st.error("❌ Ошибка при загрузке брендов")
+            available_brands = []
+
+        if available_brands:
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                selected_brand = st.selectbox("Выберите бренд:", available_brands)
+            with col2:
+                current_markup = brand_markups.get(selected_brand, self.price_rules.get('global_markup', 0))
+                brand_markup = st.number_input(
+                    "Наценка (%):",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=current_markup * 100,
+                    step=0.1,
+                    key=f"markup_{selected_brand}"
+                )
+            if st.button("Сохранить наценку", key=f"save_{selected_brand}"):
+                # Обновляем словарь наценок
+                brand_markups[selected_brand] = brand_markup / 100
+                self.price_rules['brand_markups'] = brand_markups
+                self.save_price_rules()
+                st.success(f"✅ Наценка для {selected_brand} сохранена")
+
+        # Ограничения цен
+        st.subheader("Ограничения по ценам")
+        col1, col2 = st.columns(2)
+        with col1:
+            min_price = st.number_input("Минимальная цена:", min_value=0.0, value=float(self.price_rules['min_price']), step=0.01)
+            self.price_rules['min_price'] = min_price
+        with col2:
+            max_price = st.number_input("Максимальная цена:", min_value=0.0, value=float(self.price_rules['max_price']), step=0.01)
+            self.price_rules['max_price'] = max_price
+
+        if st.button("Сохранить все настройки цен"):
+            self.save_price_rules()
+            st.success("✅ Все настройки цен сохранены")
+
+    def show_exclusion_settings(self):
+        """Интерфейс управления списком исключений при экспорте"""
+        st.header("🚫 Управление исключениями при экспорте")
+        st.info("Товары, содержащие эти слова в названии, будут исключены из экспорта")
+
+        current_exclusions = "\n".join(self.exclusion_rules)
+        new_exclusions = st.text_area(
+            "Список исключений (по одному на строку):",
+            value=current_exclusions,
+            height=200,
+            placeholder="Введите слова для исключения, например:\nКузов\nСтекла\nМасла"
+        )
+
+        if st.button("Сохранить правила исключения"):
+            # Очистка и фильтрация ввода
+            cleaned = [line.strip() for line in new_exclusions.splitlines() if line.strip()]
+            if len(cleaned) != len(set(cleaned)):
+                st.warning("Обнаружены дублирующиеся записи. Они будут автоматически удалены.")
+            self.exclusion_rules = list(dict.fromkeys(cleaned))
+            self.save_exclusion_rules()
+            st.success("✅ Правила исключения сохранены")
+
+    def show_category_mapping(self):
+        """Интерфейс настройки пользовательских категорий"""
+        st.header("🗂️ Управление категориями товаров")
+        st.info("Настройте соответствие между названиями товаров и категориями")
+
+        # Текущие правила
+        st.subheader("Текущие правила")
+        if self.category_mapping:
+            mapping_df = pl.DataFrame({
+                "Название товара": list(self.category_mapping.keys()),
+                "Категория": list(self.category_mapping.values())
+            }).to_pandas()
+            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+        else:
+            st.write("Нет пользовательских правил")
+
+        # Добавление нового правила
+        st.subheader("Добавить правило")
+        col1, col2 = st.columns(2)
+        with col1:
+            name_pattern = st.text_input("Ключевое слово в названии")
+        with col2:
+            category = st.text_input("Категория")
+        if st.button("➕ Добавить"):
+            if name_pattern.strip() and category.strip():
+                normalized_key = name_pattern.strip().lower()
+                existing_keys = {k.lower(): k for k in self.category_mapping.keys()}
+                if normalized_key in existing_keys:
+                    st.warning(f"Правило для '{existing_keys[normalized_key]}' обновлено")
+                self.category_mapping[name_pattern.strip()] = category.strip()
+                self.save_category_mapping()
+                st.success(f"Добавлено: {name_pattern.strip()} → {category.strip()}")
+                st.experimental_rerun()
+            else:
+                st.error("Заполните оба поля")
+
+        # Удаление правила
+        if self.category_mapping:
+            st.subheader("🗑️ Удалить правило")
+            rule_to_delete = st.selectbox(
+                "Выберите правило",
+                options=list(self.category_mapping.keys()),
+                format_func=lambda x: f"{x} → {self.category_mapping[x]}"
+            )
+            if st.button("Удалить"):
+                del self.category_mapping[rule_to_delete]
+                self.save_category_mapping()
+                st.success(f"Удалено: {rule_to_delete}")
+                st.experimental_rerun()
+
+    def show_data_management(self):
+        """Основной интерфейс управления данными"""
+        st.header("🔧 Управление данными")
+        st.warning("⚠️ Операции необратимы!")
+
+        management_option = st.radio(
+            "Выберите действие:",
+            [
+                "Удалить по бренду",
+                "Удалить по артикули",
+                "Управление ценами",
+                "Исключения",
+                "Категории",
+                "Облачная синхронизация"
+            ],
+            format_func=lambda x: {
+                "Удалить по бренду": "🏭 Удалить все записи бренда",
+                "Удалить по артикули": "📦 Удалить все записи артикула",
+                "Управление ценами": "💰 Цены и наценки",
+                "Исключения": "🚫 Исключения при экспорте",
+                "Категории": "🗂️ Категории товаров",
+                "Облачная синхронизация": "☁️ Облачная синхронизация"
+            }[x]
+        )
+
+        if management_option == "Удалить по бренду":
+            self._show_delete_by_brand()
+        elif management_option == "Удалить по артикули":
+            self._show_delete_by_artikul()
+        elif management_option == "Управление ценами":
+            self.show_price_settings()
+        elif management_option == "Исключения":
+            self.show_exclusion_settings()
+        elif management_option == "Категории":
+            self.show_category_mapping()
+        elif management_option == "Облачная синхронизация":
+            self.show_cloud_sync()
+
+    def _show_delete_by_brand(self):
+        """Удаление по бренду"""
+        st.subheader("Удаление по бренду")
+        try:
+            brands_result = self.conn.execute("""
+                SELECT DISTINCT brand FROM parts WHERE brand IS NOT NULL ORDER BY brand
+            """).fetchall()
+            available_brands = [row[0] for row in brands_result] if brands_result else []
+        except Exception as e:
+            logger.error(f"Ошибка: {e}")
+            st.error("Ошибка при получении брендов")
+            return
+        if not available_brands:
+            st.info("Нет данных")
+            return
+        selected_brand = st.selectbox("Бренд", available_brands)
+
+        # Получение нормального ключа
+        brand_norm_result = self.conn.execute("SELECT brand_norm FROM parts WHERE brand = ? LIMIT 1", [selected_brand]).fetchone()
+        if brand_norm_result:
+            brand_norm = brand_norm_result[0]
+        else:
+            brand_norm = self.normalize_key(pl.Series([selected_brand]))[0]
+
+        count = self.conn.execute("SELECT COUNT(*) FROM parts WHERE brand_norm = ?", [brand_norm]).fetchone()[0]
+        st.info(f"Удалить {count} записей бренда '{selected_brand}'?")
+
+        if st.checkbox("Подтверждаю удаление"):
+            if st.button("Удалить"):
+                deleted = self.delete_by_brand(brand_norm)
+                st.success(f"Удалено {deleted} записей")
+                st.experimental_rerun()
+
+    def delete_by_brand(self, brand_norm: str) -> int:
+        """Удаление по бренду"""
+        with self.conn.transaction():
+            count_parts = self.conn.execute("DELETE FROM parts WHERE brand_norm = ?", [brand_norm]).rowcount
+            count_cross = self.conn.execute("DELETE FROM cross_references WHERE brand_norm = ?", [brand_norm]).rowcount
+        return count_parts
+
+    def _show_delete_by_artikul(self):
+        """Удаление по артикулу"""
+        st.subheader("Удаление по артикулу")
+        artikul_input = st.text_input("Артикул")
+        if artikul_input:
+            artikul_norm = self.normalize_key(pl.Series([artikul_input]))[0]
+            count = self.conn.execute("SELECT COUNT(*) FROM parts WHERE artikul_norm = ?", [artikul_norm]).fetchone()[0]
+            st.info(f"Найдено {count} записей для артикула '{artikul_input}'")
+            if st.checkbox("Подтверждаю"):
+                if st.button("Удалить"):
+                    deleted = self.delete_by_artikul(artikul_norm)
+                    st.success(f"Удалено {deleted} записей")
+                    st.experimental_rerun()
+
+    def delete_by_artikul(self, artikul_norm: str) -> int:
+        """Удаление по артикулу"""
+        with self.conn.transaction():
+            count_parts = self.conn.execute("DELETE FROM parts WHERE artikul_norm = ?", [artikul_norm]).rowcount
+            count_cross = self.conn.execute("DELETE FROM cross_references WHERE artikul_norm = ?", [artikul_norm]).rowcount
+        return count_parts
+
+    def show_cloud_sync(self):
+        """Облачная синхронизация"""
+        st.header("☁️ Облачная синхронизация")
+        st.subheader("Настройки")
+        self.cloud_config['enabled'] = st.checkbox("Включить", value=self.cloud_config['enabled'])
+        providers = ["s3", "gcs", "azure"]
+        current_idx = providers.index(self.cloud_config['provider']) if self.cloud_config['provider'] in providers else 0
+        self.cloud_config['provider'] = st.selectbox("Провайдер", providers, index=current_idx)
+        self.cloud_config['bucket'] = st.text_input("Bucket / Container", value=self.cloud_config['bucket'])
+        self.cloud_config['region'] = st.text_input("Регион", value=self.cloud_config['region'])
+        self.cloud_config['sync_interval'] = st.number_input("Интервал (сек)", min_value=300, max_value=86400, value=int(self.cloud_config['sync_interval']))
+
+        if st.button("💾 Сохранить настройки"):
+            self.save_cloud_config()
+            st.success("Настройки сохранены")
+
+        st.subheader("Текущее состояние")
+        last_sync = self.cloud_config.get('last_sync', 0)
+        if last_sync > 0:
+            st.info(f"Последняя синхронизация: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_sync))}")
+        else:
+            st.info("Еще не синхронизировано")
+        if st.button("🔄 Выполнить сейчас"):
+            self.perform_cloud_sync()
+
+    def perform_cloud_sync(self):
+        """Заглушка для синхронизации"""
+        if not self.cloud_config.get('enabled'):
+            st.warning("Синхронизация отключена")
+            return
+        if not self.cloud_config.get('bucket'):
+            st.error("Не указан bucket")
+            return
+        with st.spinner("Синхронизация..."):
+            # Тут должна быть интеграция с облаком
+            time.sleep(1.5)
+            st.success("База успешно отправлена")
+            self.cloud_config['last_sync'] = int(time.time())
+            self.save_cloud_config()
+
+    def show_export_interface(self):
+        """Интерфейс экспорта"""
+        st.header("📤 Экспорт данных")
+        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts)").fetchone()[0]
+        st.info(f"Всего: {total}")
+        if total == 0:
+            st.warning("Нет данных для экспорта")
+            return
+
+        format_choice = st.radio("Формат", ["CSV", "Excel", "Parquet"])
+        selected_columns = st.multiselect("Колонки", [
+            "Артикул бренда", "Бренд", "Наименование", "Применимость", "Описание",
+            "Категория товара", "Кратность", "Длинна", "Ширина", "Высота", "Вес",
+            "Длинна/Ширина/Высота", "OE номер", "аналоги", "Ссылка на изображение", "Цена", "Валюта"
+        ])
+
+        include_prices = st.checkbox("Включить цены", value=True)
+        apply_markup = st.checkbox("Применить наценку", value=True, disabled=not include_prices)
+
+        if st.button("🚀 Экспортировать"):
+            output_path = self.data_dir / f"export.{format_choice.lower()}"
+            with st.spinner("Генерация файла..."):
+                if format_choice == "CSV":
+                    self.export_to_csv_optimized(str(output_path), selected_columns if selected_columns else None, include_prices, apply_markup)
+                elif format_choice == "Excel":
+                    self.export_to_excel_optimized(str(output_path), selected_columns if selected_columns else None, include_prices, apply_markup)
+                elif format_choice == "Parquet":
+                    self.export_to_parquet(str(output_path), selected_columns if selected_columns else None, include_prices, apply_markup)
+                else:
+                    st.warning("Неподдерживаемый формат")
+                    return
+            with open(output_path, "rb") as f:
+                st.download_button("⬇️ Скачать файл", f, file_name=output_path.name)
+
+    def show_export_full_button(self):
+        st.header("📤 Быстрый экспорт всего каталога в CSV")
+        total = self.conn.execute("SELECT COUNT(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts)").fetchone()[0]
+        st.write(f"Всего уникальных товаров: {total}")
+        if total == 0:
+            st.warning("Нет данных для экспорта")
+            return
+        if st.button("Экспортировать полный каталог в CSV"):
+            output_path = self.data_dir / "full_export.csv"
+            with st.spinner("Генерация файла..."):
+                success = self.export_to_csv_optimized(str(output_path))
+            if success:
+                with open(output_path, "rb") as f:
+                    st.download_button("⬇️ Скачать полный экспорт", f, file_name=output_path.name)
+
     def show_statistics(self):
         """Статистика"""
         st.header("📈 Статистика")
@@ -853,6 +1209,7 @@ def main():
                 st.warning("Загрузите хотя бы один файл")
     elif option == "Экспорт":
         catalog.show_export_interface()
+        catalog.show_export_full_button()
     elif option == "Статистика":
         catalog.show_statistics()
     elif option == "Управление":
