@@ -563,189 +563,133 @@ class HighVolumeAutoPartsCatalog:
         # CTE-запросы
         ctes = f"""
         WITH DescriptionTemplate AS (
-            SELECT CHR(10) || CHR(10) || $${standard_description}$$ AS text
-        ),
-        BrandMarkups AS (
-            SELECT brand, markup FROM (
-                {self._get_brand_markups_sql()}
-            ) AS tmp
-        ),
-        PartDetails AS (
-            SELECT 
-                cr.artikul_norm, 
-                cr.brand_norm,
-                STRING_AGG(
-                    DISTINCT regexp_replace(
-                        regexp_replace(o.oe_number, '''', ''),
-                        '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
-                    ), ', '
-                ) AS oe_list,
-                ANY_VALUE(o.name) AS representative_name,
-                ANY_VALUE(o.applicability) AS representative_applicability,
-                ANY_VALUE(o.category) AS representative_category
-            FROM cross_references cr
-            LEFT JOIN oe o ON cr.oe_number_norm = o.oe_number_norm
-            GROUP BY cr.artikul_norm, cr.brand_norm
-        ),
-        AllAnalogs AS (
-            SELECT 
-                cr1.artikul_norm, 
-                cr1.brand_norm,
-                STRING_AGG(
-                    DISTINCT regexp_replace(
-                        regexp_replace(p2.artikul, '''', ''),
-                        '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
-                    ), ', '
-                ) AS analog_list
-            FROM cross_references cr1
-            JOIN cross_references cr2 ON cr1.oe_number_norm = cr2.oe_number_norm
-            JOIN parts p2 ON cr2.artikul_norm = p2.artikul_norm AND cr2.brand_norm = p2.brand_norm
-            WHERE (cr1.artikul_norm != p2.artikul_norm OR cr1.brand_norm != p2.brand_norm)
-            GROUP BY cr1.artikul_norm, cr1.brand_norm
-        ),
-        InitialOENumbers AS (
-            SELECT DISTINCT p.artikul_norm, p.brand_norm, cr.oe_number_norm
-            FROM parts p
-            LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
-            WHERE cr.oe_number_norm IS NOT NULL
-        ),
-        Level1Analogs AS (
-            SELECT DISTINCT 
-                i.artikul_norm AS source_artikul_norm, 
-                i.brand_norm AS source_brand_norm,
-                cr2.artikul_norm AS related_artikul_norm, 
-                cr2.brand_norm AS related_brand_norm
-            FROM InitialOENumbers i
-            JOIN cross_references cr2 ON i.oe_number_norm = cr2.oe_number_norm
-            WHERE NOT (i.artikul_norm = cr2.artikul_norm AND i.brand_norm = cr2.brand_norm)
-        ),
-        Level1OENumbers AS (
-            SELECT DISTINCT 
-                l1.source_artikul_norm, 
-                l1.source_brand_norm, 
-                cr3.oe_number_norm
-            FROM Level1Analogs l1
-            JOIN cross_references cr3 ON l1.related_artikul_norm = cr3.artikul_norm AND l1.related_brand_norm = cr3.brand_norm
-            WHERE NOT EXISTS (
-                SELECT 1 FROM InitialOENumbers i
-                WHERE i.artikul_norm = l1.source_artikul_norm 
-                  AND i.brand_norm = l1.source_brand_norm 
-                  AND i.oe_number_norm = cr3.oe_number_norm
-            )
-        ),
-        Level2Analogs AS (
-            SELECT DISTINCT 
-                loe.source_artikul_norm, 
-                loe.source_brand_norm,
-                cr4.artikul_norm AS related_artikul_norm, 
-                cr4.brand_norm AS related_brand_norm
-            FROM Level1OENumbers loe
-            JOIN cross_references cr4 ON loe.oe_number_norm = cr4.oe_number_norm
-            WHERE NOT (loe.source_artikul_norm = cr4.artikul_norm AND loe.source_brand_norm = cr4.brand_norm)
-        ),
-        AllRelatedParts AS (
-            SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
-            FROM Level1Analogs
-            UNION
-            SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
-            FROM Level2Analogs
-        ),
-        AggregatedAnalogData AS (
-            SELECT 
-                arp.source_artikul_norm AS artikul_norm,
-                arp.source_brand_norm AS brand_norm,
-                MAX(CASE WHEN p2.length IS NOT NULL THEN p2.length ELSE NULL END) AS length,
-                MAX(CASE WHEN p2.width IS NOT NULL THEN p2.width ELSE NULL END) AS width,
-                MAX(CASE WHEN p2.height IS NOT NULL THEN p2.height ELSE NULL END) AS height,
-                MAX(CASE WHEN p2.weight IS NOT NULL THEN p2.weight ELSE NULL END) AS weight,
-                ANY_VALUE(
-                    CASE 
-                        WHEN p2.dimensions_str IS NOT NULL AND p2.dimensions_str != '' AND UPPER(TRIM(p2.dimensions_str)) != 'XX'
-                        THEN p2.dimensions_str
-                        ELSE NULL
-                    END
-                ) AS dimensions_str,
-                ANY_VALUE(
-                    CASE 
-                        WHEN pd2.representative_name IS NOT NULL AND pd2.representative_name != '' 
-                        THEN pd2.representative_name 
-                        ELSE NULL
-                    END
-                ) AS representative_name,
-                ANY_VALUE(
-                    CASE 
-                        WHEN pd2.representative_applicability IS NOT NULL AND pd2.representative_applicability != ''
-                        THEN pd2.representative_applicability
-                        ELSE NULL
-                    END
-                ) AS representative_applicability,
-                ANY_VALUE(
-                    CASE 
-                        WHEN pd2.representative_category IS NOT NULL AND pd2.representative_category != ''
-                        THEN pd2.representative_category
-                        ELSE NULL
-                    END
-                ) AS representative_category
-            FROM AllRelatedParts arp
-            JOIN parts p2 ON arp.related_artikul_norm = p2.artikul_norm AND arp.related_brand_norm = p2.brand_norm
-            LEFT JOIN PartDetails pd2 ON p2.artikul_norm = pd2.artikul_norm AND p2.brand_norm = pd2.brand_norm
-            GROUP BY arp.source_artikul_norm, arp.source_brand_norm
-        ),
-        RankedData AS (
-            SELECT 
-                p.artikul,
-                p.brand,
-                p.description,
-                p.multiplicity,
-                p.length,
-                p.width,
-                p.height,
-                p.weight,
-                p.dimensions_str,
-                p.image_url,
-                pd.representative_name,
-                pd.representative_applicability,
-                pd.representative_category,
-                pd.oe_list,
-                aa.analog_list,
-                p_analog.length AS analog_length,
-                p_analog.width AS analog_width,
-                p_analog.height AS analog_height,
-                p_analog.weight AS analog_weight,
-                p_analog.dimensions_str AS analog_dimensions_str,
-                p_analog.representative_name AS analog_representative_name,
-                p_analog.representative_applicability AS analog_representative_applicability,
-                p_analog.representative_category AS analog_representative_category,
-                ROW_NUMBER() OVER (
-                    PARTITION BY p.artikul_norm, p.brand_norm 
-                    ORDER BY pd.representative_name DESC NULLS LAST, pd.oe_list DESC NULLS LAST
-                ) AS rn
-            FROM parts p
-            LEFT JOIN PartDetails pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
-            LEFT JOIN AllAnalogs aa ON p.artikul_norm = aa.artikul_norm AND p.brand_norm = aa.brand_norm
-            LEFT JOIN AggregatedAnalogData p_analog ON p.artikul_norm = p_analog.artikul_norm AND p.brand_norm = p_analog.brand_norm
-        )
-        """
-
-        select_clause = ",\n        ".join(selected_exprs)
-
-        price_join = """
-        LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm
-        LEFT JOIN BrandMarkups brm ON r.brand = brm.brand
-        """ if include_prices else ""
-
-        query = f"""
-        {ctes}
-        SELECT
-            {price_select}
-            {select_clause}
-        FROM RankedData r
-        CROSS JOIN DescriptionTemplate dt
-        {price_join}
-        WHERE r.rn = 1
-        {exclusion_where}
-        ORDER BY r.brand, r.artikul
-        """
+    SELECT CHR(10) || CHR(10) || $$Ваш текст описания здесь...$$ AS text
+),
+PartDetails AS (
+    SELECT
+        cr.artikul_norm,
+        cr.brand_norm,
+        STRING_AGG(DISTINCT regexp_replace(regexp_replace(o.oe_number, '''', ''), '[^0-9A-Za-zА-Яа-яЁё`\-\s]', '', 'g'), ', ') AS oe_list,
+        ANY_VALUE(o.name) AS representative_name,
+        ANY_VALUE(o.applicability) AS representative_applicability,
+        ANY_VALUE(o.category) AS representative_category
+    FROM cross_references cr
+    JOIN oe_data o ON cr.oe_number_norm = o.oe_number_norm
+    GROUP BY cr.artikul_norm, cr.brand_norm
+),
+AllAnalogs AS (
+    SELECT
+        cr1.artikul_norm,
+        cr1.brand_norm,
+        STRING_AGG(DISTINCT regexp_replace(regexp_replace(p2.artikul, '''', ''), '[^0-9A-Za-zА-Яа-яЁё`\-\s]', '', 'g'), ', ') as analog_list
+    FROM cross_references cr1
+    JOIN cross_references cr2 ON cr1.oe_number_norm = cr2.oe_number_norm
+    JOIN parts_data p2 ON cr2.artikul_norm = p2.artikul_norm AND cr2.brand_norm = p2.brand_norm
+    WHERE (cr1.artikul_norm != p2.artikul_norm OR cr1.brand_norm != p2.brand_norm)
+    GROUP BY cr1.artikul_norm, cr1.brand_norm
+),
+InitialOENumbers AS (
+    SELECT DISTINCT
+        p.artikul_norm,
+        p.brand_norm,
+        cr.oe_number_norm
+    FROM parts_data p
+    LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
+    WHERE cr.oe_number_norm IS NOT NULL
+),
+Level1Analogs AS (
+    SELECT DISTINCT
+        i.artikul_norm AS source_artikul_norm,
+        i.brand_norm AS source_brand_norm,
+        cr2.artikul_norm AS related_artikul_norm,
+        cr2.brand_norm AS related_brand_norm
+    FROM InitialOENumbers i
+    JOIN cross_references cr2 ON i.oe_number_norm = cr2.oe_number_norm
+    WHERE NOT (i.artikul_norm = cr2.artikul_norm AND i.brand_norm = cr2.brand_norm)
+),
+Level1OENumbers AS (
+    SELECT DISTINCT
+        l1.source_artikul_norm,
+        l1.source_brand_norm,
+        cr3.oe_number_norm
+    FROM Level1Analogs l1
+    JOIN cross_references cr3 ON l1.related_artikul_norm = cr3.artikul_norm 
+                                AND l1.related_brand_norm = cr3.brand_norm
+    WHERE NOT EXISTS (
+        SELECT 1 FROM InitialOENumbers i 
+        WHERE i.artikul_norm = l1.source_artikul_norm 
+        AND i.brand_norm = l1.source_brand_norm 
+        AND i.oe_number_norm = cr3.oe_number_norm
+    )
+),
+Level2Analogs AS (
+    SELECT DISTINCT
+        loe.source_artikul_norm,
+        loe.source_brand_norm,
+        cr4.artikul_norm AS related_artikul_norm,
+        cr4.brand_norm AS related_brand_norm
+    FROM Level1OENumbers loe
+    JOIN cross_references cr4 ON loe.oe_number_norm = cr4.oe_number_norm
+    WHERE NOT (loe.source_artikul_norm = cr4.artikul_norm AND loe.source_brand_norm = cr4.brand_norm)
+),
+AllRelatedParts AS (
+    SELECT DISTINCT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
+    FROM Level1Analogs
+    UNION
+    SELECT DISTINCT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
+    FROM Level2Analogs
+),
+AggregatedAnalogData AS (
+    SELECT
+        arp.source_artikul_norm AS artikul_norm,
+        arp.source_brand_norm AS brand_norm,
+        MAX(CASE WHEN p2.length IS NOT NULL THEN p2.length ELSE NULL END) AS length,
+        MAX(CASE WHEN p2.width IS NOT NULL THEN p2.width ELSE NULL END) AS width,
+        MAX(CASE WHEN p2.height IS NOT NULL THEN p2.height ELSE NULL END) AS height,
+        MAX(CASE WHEN p2.weight IS NOT NULL THEN p2.weight ELSE NULL END) AS weight,
+        ANY_VALUE(CASE WHEN p2.dimensions_str IS NOT NULL 
+                       AND p2.dimensions_str != '' 
+                       AND UPPER(TRIM(p2.dimensions_str)) != 'XX' 
+                  THEN p2.dimensions_str ELSE NULL END) AS dimensions_str,
+        ANY_VALUE(CASE WHEN pd2.representative_name IS NOT NULL AND pd2.representative_name != '' THEN pd2.representative_name ELSE NULL END) AS representative_name,
+        ANY_VALUE(CASE WHEN pd2.representative_applicability IS NOT NULL AND pd2.representative_applicability != '' THEN pd2.representative_applicability ELSE NULL END) AS representative_applicability,
+        ANY_VALUE(CASE WHEN pd2.representative_category IS NOT NULL AND pd2.representative_category != '' THEN pd2.representative_category ELSE NULL END) AS representative_category
+    FROM AllRelatedParts arp
+    JOIN parts_data p2 ON arp.related_artikul_norm = p2.artikul_norm AND arp.related_brand_norm = p2.brand_norm
+    LEFT JOIN PartDetails pd2 ON p2.artikul_norm = pd2.artikul_norm AND p2.brand_norm = pd2.brand_norm
+    GROUP BY arp.source_artikul_norm, arp.source_brand_norm
+)
+-- далее основной SELECT с объединением и выборками
+SELECT
+    p.artikul AS "Артикул бренда",
+    p.brand AS "Бренд",
+    pd.representative_name AS "Наименование",
+    pd.representative_applicability AS "Применимость",
+    p.description AS "Описание",
+    pd.representative_category AS "Категория товара",
+    p.multiplicity AS "Кратность",
+    p.length AS "Длинна",
+    p.width AS "Ширина",
+    p.height AS "Высота",
+    p.weight AS "Вес",
+    p.dimensions_str AS "Длинна/Ширина/Высота",
+    pd.oe_list AS "OE номер",
+    aa.analog_list AS "аналоги",
+    p_analog.length AS "Аналог Длинна",
+    p_analog.width AS "Аналог Ширина",
+    p_analog.height AS "Аналог Высота",
+    p_analog.weight AS "Аналог Вес",
+    p_analog.dimensions_str AS "Аналог Длинна/Ширина/Высота",
+    p_analog.representative_name AS "Аналог Наименование",
+    p_analog.representative_applicability AS "Аналог Применимость",
+    p_analog.representative_category AS "Аналог Категория"
+FROM parts_data p
+LEFT JOIN PartDetails pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
+LEFT JOIN AllAnalogs aa ON p.artikul_norm = aa.artikul_norm AND p.brand_norm = aa.brand_norm
+LEFT JOIN AggregatedAnalogData p_analog ON p.artikul_norm = p_analog.artikul_norm AND p.brand_norm = p_analog.brand_norm
+LEFT JOIN DescriptionTemplate dt ON 1=1
+WHERE p.rn = 1
+ORDER BY p.brand, p.artikul;
 
         return query.strip()
 
