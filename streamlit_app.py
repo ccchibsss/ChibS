@@ -1008,10 +1008,10 @@ class HighVolumeAutoPartsCatalog:
             "Общая наценка (%):",
             min_value=0.0,
             max_value=500.0,
-            value=self.price_rules['global_markup'] * 100,
+            value=self.price_rules['global_markup'] * 500,
             step=0.1
         )
-        self.price_rules['global_markup'] = global_markup / 100
+        self.price_rules['global_markup'] = global_markup / 500
 
         st.subheader("Наценки по брендам")
         brand_markups = self.price_rules.get('brand_markups', {})
@@ -1037,13 +1037,13 @@ class HighVolumeAutoPartsCatalog:
                 brand_markup = st.number_input(
                     "Наценка (%):",
                     min_value=0.0,
-                    max_value=100.0,
-                    value=current_markup * 100,
+                    max_value=500.0,
+                    value=current_markup * 500,
                     step=0.1,
                     key=f"markup_{selected_brand}"
                 )
             if st.button("Сохранить наценку", key=f"save_{selected_brand}"):
-                brand_markups[selected_brand] = brand_markup / 100
+                brand_markups[selected_brand] = brand_markup / 500
                 self.price_rules['brand_markups'] = brand_markups
                 self.save_price_rules()
                 st.success(f"✅ Наценка для {selected_brand} сохранена")
