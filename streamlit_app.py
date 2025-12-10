@@ -587,6 +587,11 @@ class HighVolumeAutoPartsCatalog:
         return " UNION ALL ".join(rows) if rows else "SELECT NULL AS brand, NULL AS markup LIMIT 0"
 
     def build_export_query(self, selected_columns=None, include_prices=True, apply_markup=True):
+        """
+        Исправленная версия build_export_query: собирает список колонок по-частям,
+        избегая лишних запятых (zero-length delimited identifier) и корректно
+        включает колонки цены при запросе selected_columns.
+        """
         description_text = (
             "Состояние товара: новый (в упаковке). Высококачественные автозапчасти и автотовары — надежное решение для вашего автомобиля. "
             "Обеспечьте безопасность, долговечность и высокую производительность вашего авто с помощью нашего широкого ассортимента оригинальных и совместимых автозапчастей. "
@@ -596,31 +601,32 @@ class HighVolumeAutoPartsCatalog:
             "Выбирайте только лучшее — надежность и качество от ведущих производителей."
         )
 
-        price_case = ""
-        if include_prices:
-            if apply_markup:
-                global_markup = self.price_rules['global_markup']
-                price_case = f"""
-                CASE
-                    WHEN pr.price IS NOT NULL
-                    THEN pr.price * (1 + COALESCE(brm.markup, {global_markup}))
-                    ELSE pr.price
-                END AS "Цена",
-                COALESCE(pr.currency, 'RUB') AS "Валюта",
-                """
-            else:
-                price_case = """
-                pr.price AS "Цена",
-                COALESCE(pr.currency, 'RUB') AS "Валюта",
-                """
+        # Подготовка SQL для наценок по брендам
+        brand_markups_sql = self._get_brand_markups_sql()
 
-        # Улучшенная обработка категорий и применимости
+        # Составляем список выражений для SELECT последовательно, чтобы избежать лишней запятой
+        select_parts = []
+
+        # Колонки с ценой (включаем только если include_prices и если пользователь не ограничил selected_columns
+        # или если explicit-но запросил "Цена" / "Валюта")
+        price_requested = include_prices and (not selected_columns or "Цена" in selected_columns or "Валюта" in selected_columns)
+        if price_requested:
+            if apply_markup:
+                global_markup = self.price_rules.get('global_markup', 0)
+                select_parts.append(
+                    f"CASE WHEN pr.price IS NOT NULL THEN pr.price * (1 + COALESCE(brm.markup, {global_markup})) ELSE pr.price END AS \"Цена\""
+                )
+            else:
+                select_parts.append('pr.price AS "Цена"')
+            select_parts.append("COALESCE(pr.currency, 'RUB') AS \"Валюта\"")
+
+        # Остальные колонки (название -> выражение)
         columns_map = [
             ("Артикул бренда", 'r.artikul AS "Артикул бренда"'),
             ("Бренд", 'r.brand AS "Бренд"'),
             ("Наименование", 'COALESCE(r.representative_name, r.analog_representative_name) AS "Наименование"'),
             ("Применимость", 'COALESCE(r.representative_applicability, r.analog_representative_applicability) AS "Применимость"'),
-            ("Описание", 'CONCAT(COALESCE(r.description, ""), dt.text) AS "Описание"'),
+            ("Описание", 'CONCAT(COALESCE(r.description, \'\'), dt.text) AS "Описание"'),
             ("Категория товара", 'COALESCE(r.representative_category, r.analog_representative_category) AS "Категория товара"'),
             ("Кратность", 'r.multiplicity AS "Кратность"'),
             ("Длинна", 'COALESCE(r.length, r.analog_length) AS "Длинна"'),
@@ -642,9 +648,17 @@ class HighVolumeAutoPartsCatalog:
             ("Ссылка на изображение", 'r.image_url AS "Ссылка на изображение"')
         ]
 
-        # ВАЖНО: не добавляем ("Цена","Валюта") в columns_map — они уже формируются в price_case
-        select_exprs = [
-            expr for name, expr in columns_map if not selected_columns or name in selected_columns]
+        # Добавляем остальные выражения в порядке columns_map, с учётом selected_columns фильтра
+        for name, expr in columns_map:
+            if not selected_columns or name in selected_columns:
+                select_parts.append(expr.strip())
+
+        # Если вдруг пользователь полностью снял все колонки и нет price_requested — включаем минимум r.artikul/r.brand
+        if not select_parts:
+            select_parts = ['r.artikul AS "Артикул бренда"', 'r.brand AS "Бренд"']
+
+        # Собираем тело SELECT, безопасно объединяя без завершающих запятых
+        select_clause = ",\n        ".join(select_parts)
 
         ctes = f"""
         WITH DescriptionTemplate AS (
@@ -652,7 +666,7 @@ class HighVolumeAutoPartsCatalog:
         ),
         BrandMarkups AS (
             SELECT brand, markup FROM (
-                {self._get_brand_markups_sql()}
+                {brand_markups_sql}
             ) AS tmp
         ),
         PartDetails AS (
@@ -814,8 +828,6 @@ class HighVolumeAutoPartsCatalog:
         )
         """
 
-        select_clause = ",\n        ".join(select_exprs)
-
         price_join = """
         LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm
         LEFT JOIN BrandMarkups brm ON r.brand = brm.brand
@@ -824,7 +836,6 @@ class HighVolumeAutoPartsCatalog:
         query = f"""
         {ctes}
         SELECT
-            {price_case}
             {select_clause}
         FROM RankedData r
         CROSS JOIN DescriptionTemplate dt
@@ -832,7 +843,8 @@ class HighVolumeAutoPartsCatalog:
         WHERE r.rn = 1
         ORDER BY r.brand, r.artikul
         """
-        # Убираем возможные лишние запятые и возвращаем строку
+
+        # Небольшая пост-обработка: удалить пустые строки и лишевые пробелы
         return "\n".join([line.rstrip() for line in query.strip().splitlines()])
 
     def export_to_csv_optimized(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
@@ -1068,7 +1080,7 @@ class HighVolumeAutoPartsCatalog:
                        for line in new_exclusions.splitlines() if line.strip()]
             if len(cleaned) != len(set(cleaned)):
                 st.warning(
-                    "Обнаружены дублирующиеся записи. Они будут автоматически удалены.")
+                    "Обнаружены дублирующие записи. Они будут автоматически удалены.")
             self.exclusion_rules = list(dict.fromkeys(cleaned))
             self.save_exclusion_rules()
             st.success("✅ Правила исключения сохранены")
