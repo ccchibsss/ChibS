@@ -210,7 +210,10 @@ class HighVolumeAutoPartsCatalog:
             "CREATE INDEX IF NOT EXISTS idx_prices_keys ON prices(artikul_norm, brand_norm)"
         ]
         for index_sql in indexes:
-            self.conn.execute(index_sql)
+            try:
+                self.conn.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"Не удалось создать индекс: {e}")
         st.success("🛠️ Индексы созданы.")
 
     # --- Нормализация и очистка ---
@@ -348,35 +351,42 @@ class HighVolumeAutoPartsCatalog:
             return
         df = df.unique(keep='first')
         cols = df.columns
-        pk_str = ", ".join(f'"{c}"' for c in pk)
         temp_view_name = f"temp_{table_name}_{int(time.time())}"
 
-        self.conn.register(temp_view_name, df.to_arrow())
-        update_cols = [col for col in cols if col not in pk]
-
-        if not update_cols:
-            on_conflict_action = "DO NOTHING"
-        else:
-            update_clause = ", ".join(
-                [f'"{col}" = excluded."{col}"' for col in update_cols])
-            on_conflict_action = f"DO UPDATE SET {update_clause}"
-
-        sql = f"""
-            INSERT INTO {table_name}
-            SELECT * FROM {temp_view_name}
-            ON CONFLICT ({pk_str}) {on_conflict_action};
-        """
-
+        # Регистрация временной таблицы в DuckDB
         try:
-            self.conn.execute(sql)
+            self.conn.register(temp_view_name, df.to_arrow())
+        except Exception as e:
+            logger.error(f"Ошибка регистрации временной таблицы: {e}")
+            return
+
+        # DuckDB не гарантирует синтаксис ON CONFLICT как в Postgres -> используем delete+insert
+        try:
+            pk_list = pk
+            pk_cols_csv = ", ".join(f'"{c}"' for c in pk_list)
+            # удалить существующие записи, которые совпадают по PK
+            delete_sql = f"""
+                DELETE FROM {table_name}
+                WHERE ({pk_cols_csv}) IN (SELECT {pk_cols_csv} FROM {temp_view_name});
+            """
+            self.conn.execute(delete_sql)
+            # вставить новые записи
+            insert_sql = f"""
+                INSERT INTO {table_name}
+                SELECT * FROM {temp_view_name};
+            """
+            self.conn.execute(insert_sql)
             logger.info(
-                f"Успешно обновлено/вставлено {len(df)} записей в таблицу {table_name}.")
+                f"Успешно upsert {len(df)} записей в таблицу {table_name}.")
         except Exception as e:
             logger.error(f"Ошибка при UPSERT в {table_name}: {e}")
             st.error(
                 f"Ошибка при записи в таблицу {table_name}. Детали в логе.")
         finally:
-            self.conn.unregister(temp_view_name)
+            try:
+                self.conn.unregister(temp_view_name)
+            except Exception:
+                pass
 
     def upsert_prices(self, price_df: pl.DataFrame):
         if price_df.is_empty():
@@ -571,7 +581,9 @@ class HighVolumeAutoPartsCatalog:
     def _get_brand_markups_sql(self) -> str:
         rows = []
         for brand, markup in self.price_rules['brand_markups'].items():
-            rows.append(f"SELECT '{brand}' AS brand, {markup} AS markup")
+            # экранируем одинарные кавычки в brand
+            safe_brand = brand.replace("'", "''")
+            rows.append(f"SELECT '{safe_brand}' AS brand, {markup} AS markup")
         return " UNION ALL ".join(rows) if rows else "SELECT NULL AS brand, NULL AS markup LIMIT 0"
 
     def build_export_query(self, selected_columns=None, include_prices=True, apply_markup=True):
@@ -630,9 +642,7 @@ class HighVolumeAutoPartsCatalog:
             ("Ссылка на изображение", 'r.image_url AS "Ссылка на изображение"')
         ]
 
-        if include_prices:
-            columns_map.extend([("Цена", '"Цена"'), ("Валюта", '"Валюта"')])
-
+        # ВАЖНО: не добавляем ("Цена","Валюта") в columns_map — они уже формируются в price_case
         select_exprs = [
             expr for name, expr in columns_map if not selected_columns or name in selected_columns]
 
@@ -822,7 +832,8 @@ class HighVolumeAutoPartsCatalog:
         WHERE r.rn = 1
         ORDER BY r.brand, r.artikul
         """
-        return query.strip()
+        # Убираем возможные лишние запятые и возвращаем строку
+        return "\n".join([line.rstrip() for line in query.strip().splitlines()])
 
     def export_to_csv_optimized(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
         total = self.conn.execute(
@@ -836,25 +847,24 @@ class HighVolumeAutoPartsCatalog:
                 selected_columns, include_prices, apply_markup)
             # Логирование запроса
             logger.info(f"Executing export query: {query}")
+            # Получаем результат как polars, затем в pandas для корректной записи CSV
             df = self.conn.execute(query).pl()
+            import pandas as pd
+            pdf = df.to_pandas()
 
+            # Обработка колонок размеров
             dimension_cols = ["Длинна", "Ширина",
                               "Высота", "Вес", "Длинна/Ширина/Высота"]
             for col in dimension_cols:
-                if col in df.columns:
-                    df = df.with_columns(
-                        pl.when(pl.col(col).is_not_null())
-                        .then(pl.col(col).cast(pl.Utf8))
-                        .otherwise(pl.lit(""))
-                        .alias(col)
-                    )
+                if col in pdf.columns:
+                    pdf[col] = pdf[col].astype(str).replace({'nan': ''})
 
             # Убедитесь, что директория для экспорта существует
             output_dir = Path("auto_parts_data")
             output_dir.mkdir(parents=True, exist_ok=True)
 
             buf = io.StringIO()
-            df.write_csv(buf, separator=';')
+            pdf.to_csv(buf, sep=';', index=False)
             with open(output_path, "wb") as f:
                 f.write(b'\xef\xbb\xbf')  # Добавление BOM для поддержки UTF-8
                 f.write(buf.getvalue().encode('utf-8'))
