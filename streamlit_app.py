@@ -556,8 +556,12 @@ class HighVolumeAutoPartsCatalog:
                 COALESCE(pr.currency, 'RUB') AS "Валюта",
                 """
 
-        exclusion_condition = " OR ".join([f"r.representative_name NOT ILIKE '%{ex}%'" for ex in self.exclusion_rules if ex.strip()])
-        exclusion_where = f"AND ({exclusion_condition})" if exclusion_condition else ""
+        # Исправленное условие исключения (AND NOT (... OR ...))
+        if self.exclusion_rules:
+            exclusion_condition = " OR ".join([f"r.representative_name ILIKE '%{ex}%'" for ex in self.exclusion_rules if ex.strip()])
+            exclusion_where = f"AND NOT ({exclusion_condition})"
+        else:
+            exclusion_where = ""
 
         columns_map = [
             ("Артикул бренда", 'r.artikul AS "Артикул бренда"'),
@@ -606,7 +610,7 @@ class HighVolumeAutoPartsCatalog:
                 cr.brand_norm,
                 STRING_AGG(
                     DISTINCT regexp_replace(
-                        regexp_replace(o.oe_number, '''', ''),
+                        regexp_replace(o.oe_number, '''', ''), 
                         '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
                     ), ', '
                 ) AS oe_list,
@@ -623,7 +627,7 @@ class HighVolumeAutoPartsCatalog:
                 cr1.brand_norm,
                 STRING_AGG(
                     DISTINCT regexp_replace(
-                        regexp_replace(p2.artikul, '''', ''),
+                        regexp_replace(p2.artikul, '''', ''), 
                         '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
                     ), ', '
                 ) AS analog_list
@@ -723,6 +727,8 @@ class HighVolumeAutoPartsCatalog:
         ),
         RankedData AS (
             SELECT 
+                p.artikul_norm,
+                p.brand_norm,
                 p.artikul,
                 p.brand,
                 p.description,
@@ -786,6 +792,7 @@ class HighVolumeAutoPartsCatalog:
         st.info(f"📤 Экспорт {total} записей в CSV...")
         try:
             query = self.build_export_query(selected_columns, include_prices, apply_markup)
+            logger.info(f"Executing export query: {query}")  # Логирование запроса
             df = self.conn.execute(query).pl()
 
             dimension_cols = ["Длинна", "Ширина", "Высота", "Вес", "Длинна/Ширина/Высота"]
@@ -798,17 +805,21 @@ class HighVolumeAutoPartsCatalog:
                          .alias(col)
                     )
 
+            # Убедитесь, что директория для экспорта существует
+            output_dir = Path("auto_parts_data")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
             buf = io.StringIO()
             df.write_csv(buf, separator=';')
             with open(output_path, "wb") as f:
-                f.write(b'\xef\xbb\xbf')
+                f.write(b'\xef\xbb\xbf')  # Добавление BOM для поддержки UTF-8
                 f.write(buf.getvalue().encode('utf-8'))
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             st.success(f"Данные экспортированы: {output_path} ({size_mb:.1f} МБ)")
             return True
         except Exception as e:
             logger.exception("Ошибка экспорта CSV")
-            st.error(str(e))
+            st.error(f"Ошибка при экспорте в CSV: {str(e)}")
             return False
 
     def export_to_excel_optimized(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
@@ -840,7 +851,7 @@ class HighVolumeAutoPartsCatalog:
             return True
         except Exception as e:
             logger.exception("Ошибка экспорта Parquet")
-            st.error(str(e))
+            st.error(f"Ошибка при экспорте в Parquet: {str(e)}")
             return False
 
     # --- Управление данными ---
@@ -992,7 +1003,7 @@ class HighVolumeAutoPartsCatalog:
                 "Название товара": list(self.category_mapping.keys()),
                 "Категория": list(self.category_mapping.values())
             }).to_pandas()
-            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
+            st.dataframe(mapping_df, width='stretch', hide_index=True)
         else:
             st.write("Нет пользовательских правил")
 
