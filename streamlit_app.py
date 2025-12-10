@@ -1007,7 +1007,7 @@ class HighVolumeAutoPartsCatalog:
         global_markup = st.number_input(
             "Общая наценка (%):",
             min_value=0.0,
-            max_value=100.0,
+            max_value=500.0,
             value=self.price_rules['global_markup'] * 500,
             step=0.1
         )
