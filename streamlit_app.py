@@ -528,261 +528,254 @@ class HighVolumeAutoPartsCatalog:
             rows.append(f"SELECT '{brand}' AS brand, {markup} AS markup")
         return " UNION ALL ".join(rows) if rows else "SELECT NULL AS brand, NULL AS markup LIMIT 0"
 
-    def build_export_query(self, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> str:
-        description_text = (
-            "Состояние товара: новый (в упаковке). Высококачественные автозапчасти и автотовары — надежное решение для вашего автомобиля. "
-            "Обеспечьте безопасность, долговечность и высокую производительность вашего авто с помощью нашего широкого ассортимента оригинальных и совместимых автозапчастей. "
-            "В нашем каталоге вы найдете тормозные системы, фильтры (масляные, воздушные, салонные), свечи зажигания, расходные материалы, автохимию, электроматериалы, автомасла, инструмент, "
-            "а также другие комплектующие, полностью соответствующие стандартам качества и безопасности. "
-            "Мы гарантируем быструю доставку, выгодные цены и профессиональную консультацию для любого клиента — автолюбителя, специалиста или автосервиса. "
-            "Выбирайте только лучшее — надежность и качество от ведущих производителей."
-        )
+    def build_export_query(self, selected_columns=None, include_prices=True, apply_markup=True):
+    description_text = (
+        "Состояние товара: новый (в упаковке). Высококачественные автозапчасти и автотовары — надежное решение для вашего автомобиля. "
+        "Обеспечьте безопасность, долговечность и высокую производительность вашего авто с помощью нашего широкого ассортимента оригинальных и совместимых автозапчастей. "
+        "В нашем каталоге вы найдете тормозные системы, фильтры (масляные, воздушные, салонные), свечи зажигания, расходные материалы, автохимию, электроматериалы, автомасла, инструмент, "
+        "а также другие комплектующие, полностью соответствующие стандартам качества и безопасности. "
+        "Мы гарантируем быструю доставку, выгодные цены и профессиональную консультацию для любого клиента — автолюбителя, специалиста или автосервиса. "
+        "Выбирайте только лучшее — надежность и качество от ведущих производителей."
+    )
 
-        price_case = ""
-        if include_prices:
-            if apply_markup:
-                global_markup = self.price_rules['global_markup']
-                price_case = f"""
-                CASE
-                    WHEN pr.price IS NOT NULL
-                    THEN pr.price * (1 + COALESCE(brm.markup, {global_markup}))
-                    ELSE pr.price
-                END AS "Цена",
-                COALESCE(pr.currency, 'RUB') AS "Валюта",
-                """
-            else:
-                price_case = """
-                pr.price AS "Цена",
-                COALESCE(pr.currency, 'RUB') AS "Валюта",
-                """
-
-        # Исправленное условие исключения (AND NOT (... OR ...))
-        if self.exclusion_rules:
-            exclusion_condition = " OR ".join([f"r.representative_name ILIKE '%{ex}%'" for ex in self.exclusion_rules if ex.strip()])
-            exclusion_where = f"AND NOT ({exclusion_condition})"
+    price_case = ""
+    if include_prices:
+        if apply_markup:
+            global_markup = self.price_rules['global_markup']
+            price_case = f"""
+            CASE
+                WHEN pr.price IS NOT NULL
+                THEN pr.price * (1 + COALESCE(brm.markup, {global_markup}))
+                ELSE pr.price
+            END AS "Цена",
+            COALESCE(pr.currency, 'RUB') AS "Валюта",
+            """
         else:
-            exclusion_where = ""
+            price_case = """
+            pr.price AS "Цена",
+            COALESCE(pr.currency, 'RUB') AS "Валюта",
+            """
 
-        columns_map = [
-            ("Артикул бренда", 'r.artikul AS "Артикул бренда"'),
-            ("Бренд", 'r.brand AS "Бренд"'),
-            ("Наименование", 'COALESCE(r.representative_name, r.analog_representative_name) AS "Наименование"'),
-            ("Применимость", 'COALESCE(r.representative_applicability, r.analog_representative_applicability) AS "Применимость"'),
-            ("Описание", 'CONCAT(COALESCE(r.description, ""), dt.text) AS "Описание"'),
-            ("Категория товара", 'COALESCE(r.representative_category, r.analog_representative_category) AS "Категория товара"'),
-            ("Кратность", 'r.multiplicity AS "Кратность"'),
-            ("Длинна", 'COALESCE(r.length, r.analog_length) AS "Длинна"'),
-            ("Ширина", 'COALESCE(r.width, r.analog_width) AS "Ширина"'),
-            ("Высота", 'COALESCE(r.height, r.analog_height) AS "Высота"'),
-            ("Вес", 'COALESCE(r.weight, r.analog_weight) AS "Вес"'),
-            ("Длинна/Ширина/Высота", """
-                COALESCE(
-                    CASE
-                        WHEN r.dimensions_str IS NULL OR r.dimensions_str = '' OR UPPER(TRIM(r.dimensions_str)) = 'XX'
-                        THEN NULL
-                        ELSE r.dimensions_str
-                    END,
-                    r.analog_dimensions_str
-                ) AS "Длинна/Ширина/Высота"
-            """),
-            ("OE номер", 'r.oe_list AS "OE номер"'),
-            ("аналоги", 'r.analog_list AS "аналоги"'),
-            ("Ссылка на изображение", 'r.image_url AS "Ссылка на изображение"')
-        ]
+    # Улучшенная обработка категорий и применимости
+    columns_map = [
+        ("Артикул бренда", 'r.artikul AS "Артикул бренда"'),
+        ("Бренд", 'r.brand AS "Бренд"'),
+        ("Наименование", 'COALESCE(r.representative_name, r.analog_representative_name) AS "Наименование"'),
+        ("Применимость", 'COALESCE(r.representative_applicability, r.analog_representative_applicability) AS "Применимость"'),
+        ("Описание", 'CONCAT(COALESCE(r.description, ""), dt.text) AS "Описание"'),
+        ("Категория товара", 'COALESCE(r.representative_category, r.analog_representative_category) AS "Категория товара"'),
+        ("Кратность", 'r.multiplicity AS "Кратность"'),
+        ("Длинна", 'COALESCE(r.length, r.analog_length) AS "Длинна"'),
+        ("Ширина", 'COALESCE(r.width, r.analog_width) AS "Ширина"'),
+        ("Высота", 'COALESCE(r.height, r.analog_height) AS "Высота"'),
+        ("Вес", 'COALESCE(r.weight, r.analog_weight) AS "Вес"'),
+        ("Длинна/Ширина/Высота", """
+            COALESCE(
+                CASE
+                    WHEN r.dimensions_str IS NULL OR r.dimensions_str = '' OR UPPER(TRIM(r.dimensions_str)) = 'XX'
+                    THEN NULL
+                    ELSE r.dimensions_str
+                END,
+                r.analog_dimensions_str
+            ) AS "Длинна/Ширина/Высота"
+        """),
+        ("OE номер", 'r.oe_list AS "OE номер"'),
+        ("аналоги", 'r.analog_list AS "аналоги"'),
+        ("Ссылка на изображение", 'r.image_url AS "Ссылка на изображение"')
+    ]
 
-        if include_prices:
-            columns_map.extend([("Цена", '"Цена"'), ("Валюта", '"Валюта"')])
+    if include_prices:
+        columns_map.extend([("Цена", '"Цена"'), ("Валюта", '"Валюта"')])
 
-        select_exprs = [expr for name, expr in columns_map if not selected_columns or name in selected_columns]
+    select_exprs = [expr for name, expr in columns_map if not selected_columns or name in selected_columns]
 
-        ctes = f"""
-        WITH DescriptionTemplate AS (
-            SELECT CHR(10) || CHR(10) || $${description_text}$$ AS text
-        ),
-        BrandMarkups AS (
-            SELECT brand, markup FROM (
-                {self._get_brand_markups_sql()}
-            ) AS tmp
-        ),
-        PartDetails AS (
-            SELECT 
-                cr.artikul_norm, 
-                cr.brand_norm,
-                STRING_AGG(
-                    DISTINCT regexp_replace(
-                        regexp_replace(o.oe_number, '''', ''), 
-                        '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
-                    ), ', '
-                ) AS oe_list,
-                ANY_VALUE(o.name) AS representative_name,
-                ANY_VALUE(o.applicability) AS representative_applicability,
-                ANY_VALUE(o.category) AS representative_category
-            FROM cross_references cr
-            LEFT JOIN oe o ON cr.oe_number_norm = o.oe_number_norm
-            GROUP BY cr.artikul_norm, cr.brand_norm
-        ),
-        AllAnalogs AS (
-            SELECT 
-                cr1.artikul_norm, 
-                cr1.brand_norm,
-                STRING_AGG(
-                    DISTINCT regexp_replace(
-                        regexp_replace(p2.artikul, '''', ''), 
-                        '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
-                    ), ', '
-                ) AS analog_list
-            FROM cross_references cr1
-            JOIN cross_references cr2 ON cr1.oe_number_norm = cr2.oe_number_norm
-            JOIN parts p2 ON cr2.artikul_norm = p2.artikul_norm AND cr2.brand_norm = p2.brand_norm
-            WHERE (cr1.artikul_norm != p2.artikul_norm OR cr1.brand_norm != p2.brand_norm)
-            GROUP BY cr1.artikul_norm, cr1.brand_norm
-        ),
-        InitialOENumbers AS (
-            SELECT DISTINCT p.artikul_norm, p.brand_norm, cr.oe_number_norm
-            FROM parts p
-            LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
-            WHERE cr.oe_number_norm IS NOT NULL
-        ),
-        Level1Analogs AS (
-            SELECT DISTINCT 
-                i.artikul_norm AS source_artikul_norm, 
-                i.brand_norm AS source_brand_norm,
-                cr2.artikul_norm AS related_artikul_norm, 
-                cr2.brand_norm AS related_brand_norm
-            FROM InitialOENumbers i
-            JOIN cross_references cr2 ON i.oe_number_norm = cr2.oe_number_norm
-            WHERE NOT (i.artikul_norm = cr2.artikul_norm AND i.brand_norm = cr2.brand_norm)
-        ),
-        Level1OENumbers AS (
-            SELECT DISTINCT 
-                l1.source_artikul_norm, 
-                l1.source_brand_norm, 
-                cr3.oe_number_norm
-            FROM Level1Analogs l1
-            JOIN cross_references cr3 ON l1.related_artikul_norm = cr3.artikul_norm AND l1.related_brand_norm = cr3.brand_norm
-            WHERE NOT EXISTS (
-                SELECT 1 FROM InitialOENumbers i
-                WHERE i.artikul_norm = l1.source_artikul_norm 
-                  AND i.brand_norm = l1.source_brand_norm 
-                  AND i.oe_number_norm = cr3.oe_number_norm
-            )
-        ),
-        Level2Analogs AS (
-            SELECT DISTINCT 
-                loe.source_artikul_norm, 
-                loe.source_brand_norm,
-                cr4.artikul_norm AS related_artikul_norm, 
-                cr4.brand_norm AS related_brand_norm
-            FROM Level1OENumbers loe
-            JOIN cross_references cr4 ON loe.oe_number_norm = cr4.oe_number_norm
-            WHERE NOT (loe.source_artikul_norm = cr4.artikul_norm AND loe.source_brand_norm = cr4.brand_norm)
-        ),
-        AllRelatedParts AS (
-            SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
-            FROM Level1Analogs
-            UNION
-            SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
-            FROM Level2Analogs
-        ),
-        AggregatedAnalogData AS (
-            SELECT 
-                arp.source_artikul_norm AS artikul_norm,
-                arp.source_brand_norm AS brand_norm,
-                MAX(CASE WHEN p2.length IS NOT NULL THEN p2.length ELSE NULL END) AS length,
-                MAX(CASE WHEN p2.width IS NOT NULL THEN p2.width ELSE NULL END) AS width,
-                MAX(CASE WHEN p2.height IS NOT NULL THEN p2.height ELSE NULL END) AS height,
-                MAX(CASE WHEN p2.weight IS NOT NULL THEN p2.weight ELSE NULL END) AS weight,
-                ANY_VALUE(
-                    CASE 
-                        WHEN p2.dimensions_str IS NOT NULL AND p2.dimensions_str != '' AND UPPER(TRIM(p2.dimensions_str)) != 'XX'
-                        THEN p2.dimensions_str
-                        ELSE NULL
-                    END
-                ) AS dimensions_str,
-                ANY_VALUE(
-                    CASE 
-                        WHEN pd2.representative_name IS NOT NULL AND pd2.representative_name != '' 
-                        THEN pd2.representative_name 
-                        ELSE NULL
-                    END
-                ) AS representative_name,
-                ANY_VALUE(
-                    CASE 
-                        WHEN pd2.representative_applicability IS NOT NULL AND pd2.representative_applicability != ''
-                        THEN pd2.representative_applicability
-                        ELSE NULL
-                    END
-                ) AS representative_applicability,
-                ANY_VALUE(
-                    CASE 
-                        WHEN pd2.representative_category IS NOT NULL AND pd2.representative_category != ''
-                        THEN pd2.representative_category
-                        ELSE NULL
-                    END
-                ) AS representative_category
-            FROM AllRelatedParts arp
-            JOIN parts p2 ON arp.related_artikul_norm = p2.artikul_norm AND arp.related_brand_norm = p2.brand_norm
-            LEFT JOIN PartDetails pd2 ON p2.artikul_norm = pd2.artikul_norm AND p2.brand_norm = pd2.brand_norm
-            GROUP BY arp.source_artikul_norm, arp.source_brand_norm
-        ),
-        RankedData AS (
-            SELECT 
-                p.artikul_norm,
-                p.brand_norm,
-                p.artikul,
-                p.brand,
-                p.description,
-                p.multiplicity,
-                p.length,
-                p.width,
-                p.height,
-                p.weight,
-                p.dimensions_str,
-                p.image_url,
-                pd.representative_name,
-                pd.representative_applicability,
-                pd.representative_category,
-                pd.oe_list,
-                aa.analog_list,
-                p_analog.length AS analog_length,
-                p_analog.width AS analog_width,
-                p_analog.height AS analog_height,
-                p_analog.weight AS analog_weight,
-                p_analog.dimensions_str AS analog_dimensions_str,
-                p_analog.representative_name AS analog_representative_name,
-                p_analog.representative_applicability AS analog_representative_applicability,
-                p_analog.representative_category AS analog_representative_category,
-                ROW_NUMBER() OVER (
-                    PARTITION BY p.artikul_norm, p.brand_norm 
-                    ORDER BY pd.representative_name DESC NULLS LAST, pd.oe_list DESC NULLS LAST
-                ) AS rn
-            FROM parts p
-            LEFT JOIN PartDetails pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
-            LEFT JOIN AllAnalogs aa ON p.artikul_norm = aa.artikul_norm AND p.brand_norm = aa.brand_norm
-            LEFT JOIN AggregatedAnalogData p_analog ON p.artikul_norm = p_analog.artikul_norm AND p.brand_norm = p_analog.brand_norm
+    ctes = f"""
+    WITH DescriptionTemplate AS (
+        SELECT CHR(10) || CHR(10) || $${description_text}$$ AS text
+    ),
+    BrandMarkups AS (
+        SELECT brand, markup FROM (
+            {self._get_brand_markups_sql()}
+        ) AS tmp
+    ),
+    PartDetails AS (
+        SELECT 
+            cr.artikul_norm, 
+            cr.brand_norm,
+            STRING_AGG(
+                DISTINCT regexp_replace(
+                    regexp_replace(o.oe_number, '''', ''), 
+                    '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
+                ), ', '
+            ) AS oe_list,
+            ANY_VALUE(o.name) AS representative_name,
+            ANY_VALUE(o.applicability) AS representative_applicability,
+            ANY_VALUE(o.category) AS representative_category
+        FROM cross_references cr
+        LEFT JOIN oe o ON cr.oe_number_norm = o.oe_number_norm
+        GROUP BY cr.artikul_norm, cr.brand_norm
+    ),
+    AllAnalogs AS (
+        SELECT 
+            cr1.artikul_norm, 
+            cr1.brand_norm,
+            STRING_AGG(
+                DISTINCT regexp_replace(
+                    regexp_replace(p2.artikul, '''', ''), 
+                    '[^0-9A-Za-zА-Яа-яЁё`\\-\\s]', '', 'g'
+                ), ', '
+            ) AS analog_list
+        FROM cross_references cr1
+        JOIN cross_references cr2 ON cr1.oe_number_norm = cr2.oe_number_norm
+        JOIN parts p2 ON cr2.artikul_norm = p2.artikul_norm AND cr2.brand_norm = p2.brand_norm
+        WHERE (cr1.artikul_norm != p2.artikul_norm OR cr1.brand_norm != p2.brand_norm)
+        GROUP BY cr1.artikul_norm, cr1.brand_norm
+    ),
+    InitialOENumbers AS (
+        SELECT DISTINCT p.artikul_norm, p.brand_norm, cr.oe_number_norm
+        FROM parts p
+        LEFT JOIN cross_references cr ON p.artikul_norm = cr.artikul_norm AND p.brand_norm = cr.brand_norm
+        WHERE cr.oe_number_norm IS NOT NULL
+    ),
+    Level1Analogs AS (
+        SELECT DISTINCT 
+            i.artikul_norm AS source_artikul_norm, 
+            i.brand_norm AS source_brand_norm,
+            cr2.artikul_norm AS related_artikul_norm, 
+            cr2.brand_norm AS related_brand_norm
+        FROM InitialOENumbers i
+        JOIN cross_references cr2 ON i.oe_number_norm = cr2.oe_number_norm
+        WHERE NOT (i.artikul_norm = cr2.artikul_norm AND i.brand_norm = cr2.brand_norm)
+    ),
+    Level1OENumbers AS (
+        SELECT DISTINCT 
+            l1.source_artikul_norm, 
+            l1.source_brand_norm, 
+            cr3.oe_number_norm
+        FROM Level1Analogs l1
+        JOIN cross_references cr3 ON l1.related_artikul_norm = cr3.artikul_norm AND l1.related_brand_norm = cr3.brand_norm
+        WHERE NOT EXISTS (
+            SELECT 1 FROM InitialOENumbers i
+            WHERE i.artikul_norm = l1.source_artikul_norm 
+              AND i.brand_norm = l1.source_brand_norm 
+              AND i.oe_number_norm = cr3.oe_number_norm
         )
-        """
+    ),
+    Level2Analogs AS (
+        SELECT DISTINCT 
+            loe.source_artikul_norm, 
+            loe.source_brand_norm,
+            cr4.artikul_norm AS related_artikul_norm, 
+            cr4.brand_norm AS related_brand_norm
+        FROM Level1OENumbers loe
+        JOIN cross_references cr4 ON loe.oe_number_norm = cr4.oe_number_norm
+        WHERE NOT (loe.source_artikul_norm = cr4.artikul_norm AND loe.source_brand_norm = cr4.brand_norm)
+    ),
+    AllRelatedParts AS (
+        SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
+        FROM Level1Analogs
+        UNION
+        SELECT source_artikul_norm, source_brand_norm, related_artikul_norm, related_brand_norm
+        FROM Level2Analogs
+    ),
+    AggregatedAnalogData AS (
+        SELECT 
+            arp.source_artikul_norm AS artikul_norm,
+            arp.source_brand_norm AS brand_norm,
+            MAX(CASE WHEN p2.length IS NOT NULL THEN p2.length ELSE NULL END) AS length,
+            MAX(CASE WHEN p2.width IS NOT NULL THEN p2.width ELSE NULL END) AS width,
+            MAX(CASE WHEN p2.height IS NOT NULL THEN p2.height ELSE NULL END) AS height,
+            MAX(CASE WHEN p2.weight IS NOT NULL THEN p2.weight ELSE NULL END) AS weight,
+            ANY_VALUE(
+                CASE 
+                    WHEN p2.dimensions_str IS NOT NULL AND p2.dimensions_str != '' AND UPPER(TRIM(p2.dimensions_str)) != 'XX'
+                    THEN p2.dimensions_str
+                    ELSE NULL
+                END
+            ) AS dimensions_str,
+            ANY_VALUE(
+                CASE 
+                    WHEN pd2.representative_name IS NOT NULL AND pd2.representative_name != '' 
+                    THEN pd2.representative_name 
+                    ELSE NULL
+                END
+            ) AS representative_name,
+            ANY_VALUE(
+                CASE 
+                    WHEN pd2.representative_applicability IS NOT NULL AND pd2.representative_applicability != ''
+                    THEN pd2.representative_applicability
+                    ELSE NULL
+                END
+            ) AS representative_applicability,
+            ANY_VALUE(
+                CASE 
+                    WHEN pd2.representative_category IS NOT NULL AND pd2.representative_category != ''
+                    THEN pd2.representative_category
+                    ELSE NULL
+                END
+            ) AS representative_category
+        FROM AllRelatedParts arp
+        JOIN parts p2 ON arp.related_artikul_norm = p2.artikul_norm AND arp.related_brand_norm = p2.brand_norm
+        LEFT JOIN PartDetails pd2 ON p2.artikul_norm = pd2.artikul_norm AND p2.brand_norm = pd2.brand_norm
+        GROUP BY arp.source_artikul_norm, arp.source_brand_norm
+    ),
+    RankedData AS (
+        SELECT 
+            p.artikul_norm,
+            p.brand_norm,
+            p.artikul,
+            p.brand,
+            p.description,
+            p.multiplicity,
+            p.length,
+            p.width,
+            p.height,
+            p.weight,
+            p.dimensions_str,
+            p.image_url,
+            pd.representative_name,
+            pd.representative_applicability,
+            pd.representative_category,
+            pd.oe_list,
+            aa.analog_list,
+            p_analog.length AS analog_length,
+            p_analog.width AS analog_width,
+            p_analog.height AS analog_height,
+            p_analog.weight AS analog_weight,
+            p_analog.dimensions_str AS analog_dimensions_str,
+            p_analog.representative_name AS analog_representative_name,
+            p_analog.representative_applicability AS analog_representative_applicability,
+            p_analog.representative_category AS analog_representative_category,
+            ROW_NUMBER() OVER (
+                PARTITION BY p.artikul_norm, p.brand_norm 
+                ORDER BY pd.representative_name DESC NULLS LAST, pd.oe_list DESC NULLS LAST
+            ) AS rn
+        FROM parts p
+        LEFT JOIN PartDetails pd ON p.artikul_norm = pd.artikul_norm AND p.brand_norm = pd.brand_norm
+        LEFT JOIN AllAnalogs aa ON p.artikul_norm = aa.artikul_norm AND p.brand_norm = aa.brand_norm
+        LEFT JOIN AggregatedAnalogData p_analog ON p.artikul_norm = p_analog.artikul_norm AND p.brand_norm = p_analog.brand_norm
+    )
+    """
 
-        select_clause = ",\n        ".join(select_exprs)
+    select_clause = ",\n        ".join(select_exprs)
 
-        price_join = """
-        LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm
-        LEFT JOIN BrandMarkups brm ON r.brand = brm.brand
-        """ if include_prices else ""
+    price_join = """
+    LEFT JOIN prices pr ON r.artikul_norm = pr.artikul_norm AND r.brand_norm = pr.brand_norm
+    LEFT JOIN BrandMarkups brm ON r.brand = brm.brand
+    """ if include_prices else ""
 
-        query = f"""
-        {ctes}
-        SELECT
-            {price_case}
-            {select_clause}
-        FROM RankedData r
-        CROSS JOIN DescriptionTemplate dt
-        {price_join}
-        WHERE r.rn = 1
-        {exclusion_where}
-        ORDER BY r.brand, r.artikul
-        """
-        return query.strip()
+    query = f"""
+    {ctes}
+    SELECT
+        {price_case}
+        {select_clause}
+    FROM RankedData r
+    CROSS JOIN DescriptionTemplate dt
+    {price_join}
+    WHERE r.rn = 1
+    ORDER BY r.brand, r.artikul
+    """
+    return query.strip()
 
     def export_to_csv_optimized(self, output_path: str, selected_columns: Optional[List[str]] = None, include_prices: bool = True, apply_markup: bool = True) -> bool:
         total = self.conn.execute("SELECT count(*) FROM (SELECT DISTINCT artikul_norm, brand_norm FROM parts)").fetchone()[0]
