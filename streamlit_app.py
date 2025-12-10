@@ -1,20 +1,74 @@
-# fixed_autoparts_catalog.py
 import platform
 import sys
 import polars as pl
 import duckdb
-import streamlit as st
 import os
 import time
 import logging
 import io
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 import json
+from contextlib import contextmanager
 
 warnings.filterwarnings('ignore')
+
+# Try to import streamlit; if unavailable, provide a minimal stub so the module
+# can run outside Streamlit.
+try:
+    import streamlit as st  # type: ignore
+except Exception:
+    class _DummyColumn:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+    class _DummySidebar:
+        def title(self, *a, **k): pass
+        def radio(self, label, options, **k): return options[0]
+    @contextmanager
+    def _null_ctx(*a, **k):
+        yield None
+    class _StreamlitStub:
+        def set_page_config(self, *a, **k): pass
+        def info(self, *a, **k): print(*a)
+        def success(self, *a, **k): print(*a)
+        def warning(self, *a, **k): print(*a)
+        def error(self, *a, **k): print(*a)
+        def header(self, *a, **k): print(*a)
+        def markdown(self, *a, **k): print(*a)
+        def title(self, *a, **k): print(*a)
+        def sidebar(self): return _DummySidebar()
+        @contextmanager
+        def spinner(self, *a, **k): yield None
+        def progress(self, *a, **k):
+            class P:
+                def progress(self, *a, **k): pass
+                def empty(self): pass
+            return P()
+        def file_uploader(self, *a, **k): return None
+        def radio(self, label, options, **k): return options[0]
+        def multiselect(self, *a, **k): return []
+        def checkbox(self, *a, **k): return False
+        def button(self, *a, **k): return False
+        def number_input(self, *a, **k):
+            # return default value if provided in kwargs
+            return k.get('value', 0.0)
+        def columns(self, n):
+            # return n dummy columns usable with "with"
+            if isinstance(n, (list, tuple)):
+                count = len(n)
+            else:
+                count = int(n)
+            return tuple(_DummyColumn() for _ in range(count))
+        def selectbox(self, *a, **k): return (k.get('options') or a[1])[0]
+        def text_input(self, *a, **k): return ""
+        def text_area(self, *a, **k): return ""
+        def download_button(self, *a, **k): pass
+        def datafram(self, *a, **k): pass
+        def metric(self, *a, **k): pass
+    st = _StreamlitStub()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO,
@@ -39,7 +93,7 @@ class HighVolumeAutoPartsCatalog:
         self.conn = duckdb.connect(database=str(self.db_path))
         self.setup_database()
 
-        # Streamlit page config (safe if running inside Streamlit)
+        # Safe page config (may raise if run outside Streamlit or called multiple times)
         try:
             st.set_page_config(
                 page_title="AutoParts Catalog 10M+",
@@ -47,7 +101,6 @@ class HighVolumeAutoPartsCatalog:
                 page_icon="🚗"
             )
         except Exception:
-            # set_page_config may raise if called multiple times or outside Streamlit runtime
             pass
 
     # --- Конфигурации ---
@@ -607,12 +660,10 @@ class HighVolumeAutoPartsCatalog:
     def _get_brand_markups_sql(self) -> str:
         rows = []
         for brand, markup in self.price_rules.get('brand_markups', {}).items():
-            # Escape single quotes in brand
             safe_brand = brand.replace("'", "''")
             rows.append(f"SELECT '{safe_brand}' AS brand, {markup} AS markup")
         if rows:
             return " UNION ALL ".join(rows)
-        # Return an empty-select compatible with usage inside FROM (...)
         return "SELECT NULL AS brand, NULL AS markup WHERE 0"
 
     def build_export_query(self, selected_columns=None, include_prices=True, apply_markup=True) -> str:
@@ -676,7 +727,6 @@ class HighVolumeAutoPartsCatalog:
         select_exprs = [
             expr for name, expr in columns_map if not selected_columns or name in selected_columns]
 
-        # Build CTEs and main query
         brand_markups_sql = self._get_brand_markups_sql()
         ctes = f"""
         WITH DescriptionTemplate AS (
@@ -884,7 +934,7 @@ class HighVolumeAutoPartsCatalog:
         try:
             query = self.build_export_query(
                 selected_columns, include_prices, apply_markup)
-            logger.info(f"Executing export query: {query[:1000]}")  # limit log size
+            logger.info(f"Executing export query: {query[:1000]}")
             df = self.conn.execute(query).pl()
 
             dimension_cols = ["Длинна", "Ширина",
@@ -898,14 +948,13 @@ class HighVolumeAutoPartsCatalog:
                         .alias(col)
                     )
 
-            # Убедитесь, что директория для экспорта существует
             output_dir = Path("auto_parts_data")
             output_dir.mkdir(parents=True, exist_ok=True)
 
             buf = io.StringIO()
             df.write_csv(buf, separator=';')
             with open(output_path, "wb") as f:
-                f.write(b'\xef\xbb\xbf')  # Добавление BOM для поддержки UTF-8
+                f.write(b'\xef\xbb\xbf')
                 f.write(buf.getvalue().encode('utf-8'))
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             try:
@@ -976,7 +1025,6 @@ class HighVolumeAutoPartsCatalog:
                 return 0
             self.conn.execute(
                 "DELETE FROM parts WHERE brand_norm = ?", [brand_norm])
-            # очистка кроссов, которые больше не имеют соответствующих parts
             self.conn.execute("""
                 DELETE FROM cross_references
                 WHERE (artikul_norm, brand_norm) NOT IN (
@@ -1009,8 +1057,7 @@ class HighVolumeAutoPartsCatalog:
             logger.error(f"Error deleting by artikul {artikul_norm}: {e}")
             raise
 
-    # --- Остальные интерфейсы (без изменений, но вызовы st защищены) ---
-    # For brevity, UI methods are kept but with safe st.* usage to avoid runtime errors
+    # UI methods preserved but calls to st are safe due to the stub.
     def show_export_interface(self):
         try:
             st.header("📤 Экспорт данных")
@@ -1029,13 +1076,10 @@ class HighVolumeAutoPartsCatalog:
                 pass
             return
 
-        format_choice = "CSV"
         try:
             format_choice = st.radio("Формат", ["CSV", "Excel", "Parquet"])
         except Exception:
-            pass
-
-        selected_columns = None
+            format_choice = "CSV"
         try:
             selected_columns = st.multiselect("Колонки", [
                 "Артикул бренда", "Бренд", "Наименование", "Применимость", "Описание",
@@ -1043,16 +1087,13 @@ class HighVolumeAutoPartsCatalog:
                 "Длинна/Ширина/Высота", "OE номер", "аналоги", "Ссылка на изображение", "Цена", "Валюта"
             ])
         except Exception:
-            pass
+            selected_columns = None
 
-        include_prices = True
-        apply_markup = True
         try:
             include_prices = st.checkbox("Включить цены", value=True)
-            apply_markup = st.checkbox(
-                "Применить наценку", value=True, disabled=not include_prices)
+            apply_markup = st.checkbox("Применить наценку", value=True, disabled=not include_prices)
         except Exception:
-            pass
+            include_prices, apply_markup = True, True
 
         try:
             if st.button("🚀 Экспортировать"):
@@ -1070,15 +1111,14 @@ class HighVolumeAutoPartsCatalog:
                     else:
                         st.warning("Неподдерживаемый формат")
                         return
-                with open(output_path, "rb") as f:
-                    st.download_button("⬇️ Скачать файл", f,
-                                       file_name=output_path.name)
+                try:
+                    with open(output_path, "rb") as f:
+                        st.download_button("⬇️ Скачать файл", f,
+                                           file_name=output_path.name)
+                except Exception:
+                    pass
         except Exception:
-            # If Streamlit isn't available, don't raise
             pass
-
-    # The rest of UI/show_* methods are omitted for brevity in this fixed script.
-    # They can be re-added with the same safety wrappers around st.* calls if needed.
 
 
 def main():
@@ -1088,7 +1128,8 @@ def main():
     except Exception:
         pass
     catalog = HighVolumeAutoPartsCatalog()
-    # If running via Streamlit, show sidebar and UI; otherwise, just print stats summary.
+
+    # If running under Streamlit the UI will appear; outside Streamlit print a summary.
     try:
         st.sidebar.title("🧭 Меню")
         option = st.sidebar.radio(
@@ -1098,11 +1139,11 @@ def main():
         else:
             st.info("UI sections are available when running inside Streamlit.")
     except Exception:
-        # Non-Streamlit mode: show basic DB summary
+        parts_count = 0
         try:
             parts_count = catalog.conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
         except Exception:
-            parts_count = 0
+            pass
         print(f"Database ready at: {catalog.db_path}")
         print(f"Parts in DB: {parts_count}")
 
